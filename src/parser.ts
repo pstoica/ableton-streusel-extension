@@ -1,42 +1,47 @@
 /**
- * Streusel clip-name DSL parser.
+ * Streusel mini-notation parser — recursive descent.
  *
  * Clip name format:
- *   <expr> [| <op> [=<arg>]]* [@<cycles>]
+ *   <expr> [| <op>]* [@<cycles>]
  *
- * Expressions:
- *   c3 e3 g3              literal note sequence
- *   0 2 4 -1              scale-degree sequence (requires project scale)
- *   [Melody]              reference another clip by name
- *   [A] + [B]             merge (stack) two clips
- *   e(3,8)                euclidean rhythm (3 pulses over 8 steps)
+ * Expression atoms:
+ *   c3 e3 g3        literal notes
+ *   0 2 4 -1        scale degrees
+ *   . ~             rest
+ *   [a b c]         subdivision — a, b, c share one step's duration
+ *   <a b c>         alternation — cycle 0→a, cycle 1→b, cycle 2→c, wraps
+ *   {a b c}%N       polyrhythm — play pattern a,b,c over N evenly-spaced slots
+ *   e(3,8)          euclidean shorthand
+ *   [Ref]           reference another clip by name
+ *   [A] + [B]       merge two clips
  *
- * Operations (piped with |):
- *   rev                   reverse note order
- *   add=7                 transpose by semitones (or scale degrees before scale map)
- *   slow=2                halve speed (double duration of each note)
- *   fast=2                double speed
- *   every=2:rev           apply op every N cycles
- *   take=4                keep first N notes
- *   skip=2                remove every Nth note
- *   shuffle               randomize order
- *   sort                  sort by pitch ascending
- *   dedup                 remove consecutive duplicates
- *   vel=80                set all velocities
- *   vel=rand              randomize velocities
+ * Atom modifiers (append directly to an atom or closing bracket):
+ *   *N              repeat N times within the current subdivision
+ *   !N  or  !       elongate — atom takes N weight slots (default 2 if bare !)
+ *   ?               optional — 50% chance of playing each evaluation
  */
 
-export type NoteToken = { kind: "note"; name: string };       // "c3", "e4", "g#3"
-export type DegreeToken = { kind: "degree"; value: number };  // 0, 2, -1
-export type RestToken = { kind: "rest" };                     // "." or "~"
+// ─── AST types ────────────────────────────────────────────────────────────────
 
-export type SeqExpr   = { type: "seq";   items: Token[] };
-export type RefExpr   = { type: "ref";   name: string };
-export type MergeExpr = { type: "merge"; left: Expr; right: Expr };
-export type EuclidExpr = { type: "euclid"; pulses: number; steps: number };
+export type NoteAtom   = { kind: "note";   name: string };
+export type DegreeAtom = { kind: "degree"; value: number };
+export type RestAtom   = { kind: "rest" };
+export type RefAtom    = { kind: "ref";    name: string };
+export type SeqAtom    = { kind: "seq";    items: Weighted[] }; // [...]
+export type AltAtom    = { kind: "alt";    choices: Weighted[][] }; // <...>
+export type PolyAtom   = { kind: "poly";   items: Weighted[]; steps: number }; // {...}%N
+export type EuclidAtom = { kind: "euclid"; pulses: number; steps: number };
+export type MergeAtom  = { kind: "merge";  left: Weighted[]; right: Weighted[] };
 
-export type Token = NoteToken | DegreeToken | RestToken;
-export type Expr = SeqExpr | RefExpr | MergeExpr | EuclidExpr;
+export type Atom = NoteAtom | DegreeAtom | RestAtom | RefAtom
+                | SeqAtom | AltAtom | PolyAtom | EuclidAtom | MergeAtom;
+
+export interface Weighted {
+  atom: Atom;
+  repeat: number;   // *N  — expand to N copies (default 1)
+  weight: number;   // !N  — this atom takes N time slots (default 1)
+  optional: boolean;// ?   — 50% chance of playing
+}
 
 export type Op =
   | { op: "rev" }
@@ -52,68 +57,178 @@ export type Op =
   | { op: "every"; n: number; inner: Op };
 
 export interface ParsedClip {
-  expr: Expr;
+  items: Weighted[];
   ops: Op[];
   cycles: number;
-  refs: string[];   // all [ClipName] dependencies, for graph building
+  refs: string[];
 }
 
-// ─── Tokenizer ───────────────────────────────────────────────────────────────
+// ─── Scanner ──────────────────────────────────────────────────────────────────
 
-const NOTE_RE = /^[a-gA-G][#b]?[0-9]$/;
-const DEG_RE  = /^-?[0-9]+$/;
+class Scanner {
+  pos = 0;
+  constructor(public src: string) {}
 
-function tokenize(s: string): Token[] {
-  return s.trim().split(/\s+/).filter(Boolean).map(t => {
-    if (t === "." || t === "~") return { kind: "rest" } as RestToken;
-    if (NOTE_RE.test(t)) return { kind: "note", name: t.toLowerCase() } as NoteToken;
-    if (DEG_RE.test(t))  return { kind: "degree", value: parseInt(t) } as DegreeToken;
-    throw new Error(`Unknown token: "${t}"`);
-  });
-}
+  peek(): string { return this.src[this.pos] ?? ""; }
+  eof(): boolean { return this.pos >= this.src.length; }
+  skipWS(): void { while (!this.eof() && /\s/.test(this.peek())) this.pos++; }
 
-// ─── Expression parser ───────────────────────────────────────────────────────
-
-function parseExpr(raw: string): { expr: Expr; refs: string[] } {
-  const refs: string[] = [];
-
-  // Euclidean: e(3,8)
-  const eucMatch = raw.match(/^e\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)$/);
-  if (eucMatch) {
-    return { expr: { type: "euclid", pulses: parseInt(eucMatch[1]), steps: parseInt(eucMatch[2]) }, refs };
+  eat(ch: string): void {
+    if (this.src[this.pos] !== ch) throw new Error(`Expected '${ch}' at ${this.pos}`);
+    this.pos++;
   }
 
-  // Merge: [A] + [B] (simple two-operand split)
-  const mergeMatch = raw.match(/^(\[.*?\])\s*\+\s*(\[.*?\])$/);
-  if (mergeMatch) {
-    const left  = parseExpr(mergeMatch[1]);
-    const right = parseExpr(mergeMatch[2]);
-    return { expr: { type: "merge", left: left.expr, right: right.expr }, refs: [...left.refs, ...right.refs] };
+  readWord(): string {
+    const start = this.pos;
+    while (!this.eof() && !/[\s\[\]<>{}|@?*!%]/.test(this.peek())) this.pos++;
+    return this.src.slice(start, this.pos);
   }
 
-  // Reference: [ClipName]
-  const refMatch = raw.match(/^\[(.+)\]$/);
-  if (refMatch) {
-    const name = refMatch[1].trim();
-    refs.push(name);
-    return { expr: { type: "ref", name }, refs };
+  readInt(): number {
+    const start = this.pos;
+    if (this.peek() === "-") this.pos++;
+    while (!this.eof() && /\d/.test(this.peek())) this.pos++;
+    return parseInt(this.src.slice(start, this.pos));
   }
 
-  // Literal sequence
-  try {
-    const items = tokenize(raw);
-    return { expr: { type: "seq", items }, refs };
-  } catch (e) {
-    throw new Error(`Cannot parse expression: "${raw}" — ${(e as Error).message}`);
+  readFloat(): number {
+    const start = this.pos;
+    if (this.peek() === "-") this.pos++;
+    while (!this.eof() && /[\d.]/.test(this.peek())) this.pos++;
+    return parseFloat(this.src.slice(start, this.pos));
   }
 }
 
-// ─── Operation parser ────────────────────────────────────────────────────────
+// ─── Note / degree recognition ────────────────────────────────────────────────
+
+const NOTE_RE   = /^[a-gA-G][#b]?-?[0-9]$/;
+const DEGREE_RE = /^-?[0-9]+$/;
+
+function atomFromWord(word: string, refs: string[]): Atom {
+  if (word === "." || word === "~") return { kind: "rest" };
+  if (NOTE_RE.test(word))           return { kind: "note",   name: word.toLowerCase() };
+  if (DEGREE_RE.test(word))         return { kind: "degree", value: parseInt(word) };
+  throw new Error(`Unknown atom: "${word}"`);
+}
+
+// ─── Modifier reader (after an atom or closing bracket) ───────────────────────
+
+function readModifiers(sc: Scanner): { repeat: number; weight: number; optional: boolean } {
+  let repeat = 1, weight = 1, optional = false;
+  while (!sc.eof()) {
+    const ch = sc.peek();
+    if (ch === "*") {
+      sc.pos++;
+      repeat = /\d/.test(sc.peek()) ? sc.readInt() : 2;
+    } else if (ch === "!") {
+      sc.pos++;
+      weight = /\d/.test(sc.peek()) ? sc.readInt() : 2;
+    } else if (ch === "?") {
+      sc.pos++;
+      optional = true;
+    } else {
+      break;
+    }
+  }
+  return { repeat, weight, optional };
+}
+
+// ─── Item list parser ─────────────────────────────────────────────────────────
+
+function parseItems(sc: Scanner, stopAt: string, refs: string[]): Weighted[] {
+  const items: Weighted[] = [];
+  while (!sc.eof()) {
+    sc.skipWS();
+    const ch = sc.peek();
+    if (!ch || stopAt.includes(ch)) break;
+
+    let atom: Atom;
+
+    if (ch === "[") {
+      sc.pos++;
+      // Could be [Ref] or [a b c]
+      sc.skipWS();
+      // peek ahead to check for Ref pattern: [Word] where Word has no spaces before ]
+      const savedPos = sc.pos;
+      let bracketContent = "";
+      let depth = 0;
+      for (let i = sc.pos; i < sc.src.length; i++) {
+        if (sc.src[i] === "[") depth++;
+        else if (sc.src[i] === "]") { if (depth === 0) { bracketContent = sc.src.slice(sc.pos, i); break; } depth--; }
+      }
+      const trimmed = bracketContent.trim();
+      // Detect ref: no spaces, not a number or note, not containing inner brackets
+      const isRef = !trimmed.includes(" ") && !trimmed.includes("[") && !/^[a-gA-G][#b]?-?[0-9]$/.test(trimmed) && !/^-?[0-9]+$/.test(trimmed) && trimmed !== "." && trimmed !== "~";
+      if (isRef) {
+        sc.pos += bracketContent.length;
+        sc.eat("]");
+        refs.push(trimmed);
+        atom = { kind: "ref", name: trimmed };
+      } else {
+        const sub = parseItems(sc, "]", refs);
+        sc.eat("]");
+        atom = { kind: "seq", items: sub };
+      }
+    } else if (ch === "<") {
+      sc.pos++;
+      // Each whitespace-separated group is one choice
+      const choices: Weighted[][] = [];
+      while (!sc.eof() && sc.peek() !== ">") {
+        sc.skipWS();
+        if (sc.peek() === ">") break;
+        // A single "choice" can be a bracketed group or a single atom
+        const choice = parseItems(sc, " \t\n>", refs);
+        if (choice.length > 0) choices.push(choice);
+        sc.skipWS();
+      }
+      sc.eat(">");
+      atom = { kind: "alt", choices };
+    } else if (ch === "{") {
+      sc.pos++;
+      const sub = parseItems(sc, "}", refs);
+      sc.eat("}");
+      let steps = sub.length;
+      if (sc.peek() === "%") {
+        sc.pos++;
+        steps = sc.readInt();
+      }
+      atom = { kind: "poly", items: sub, steps };
+    } else if (ch === "e" && sc.src[sc.pos + 1] === "(") {
+      // e(3,8) euclidean shorthand
+      sc.pos += 2;
+      const pulses = sc.readInt();
+      if (sc.peek() === ",") sc.pos++;
+      const steps = sc.readInt();
+      sc.eat(")");
+      atom = { kind: "euclid", pulses, steps };
+    } else {
+      const word = sc.readWord();
+      if (!word) { sc.pos++; continue; } // skip unknown chars
+      atom = atomFromWord(word, refs);
+    }
+
+    const mods = readModifiers(sc);
+    items.push({ atom, ...mods });
+  }
+  return items;
+}
+
+// ─── Check for merge pattern [A] + [B] ───────────────────────────────────────
+
+function detectMerge(raw: string, refs: string[]): Weighted[] | null {
+  const m = raw.match(/^(\[[^\]]+\])\s*\+\s*(\[[^\]]+\])$/);
+  if (!m) return null;
+  const sc1 = new Scanner(m[1] as string), sc2 = new Scanner(m[2] as string);
+  const left  = parseItems(sc1, "", refs);
+  const right = parseItems(sc2, "", refs);
+  return [{ atom: { kind: "merge", left, right }, repeat: 1, weight: 1, optional: false }];
+}
+
+// ─── Operation parser (unchanged) ────────────────────────────────────────────
 
 function parseOp(raw: string): Op {
   const [name, arg] = raw.trim().split("=").map(s => s.trim());
-
-  switch (name.toLowerCase()) {
+  switch ((name ?? "").toLowerCase()) {
     case "rev":     return { op: "rev" };
     case "sort":    return { op: "sort" };
     case "shuffle": return { op: "shuffle" };
@@ -126,56 +241,51 @@ function parseOp(raw: string): Op {
     case "vel":
       return { op: "vel", value: arg === "rand" ? "rand" : parseInt(arg ?? "90") };
     case "every": {
-      // every=2:rev  or  every=2:add=7
       const [nStr, ...rest] = (arg ?? "2:rev").split(":");
-      return { op: "every", n: parseInt(nStr), inner: parseOp(rest.join(":")) };
+      return { op: "every", n: parseInt(nStr ?? "2"), inner: parseOp(rest.join(":")) };
     }
     default:
       throw new Error(`Unknown operation: "${name}"`);
   }
 }
 
-// ─── Top-level parse ─────────────────────────────────────────────────────────
+// ─── Top-level parse ──────────────────────────────────────────────────────────
 
 export function parse(clipName: string): ParsedClip | null {
-  // Skip clips that aren't patterns (no notes, no refs, no euclid)
-  const trimmed = clipName.trim();
-  if (!trimmed) return null;
+  let body = clipName.trim();
+  if (!body) return null;
 
-  // Extract cycle count suffix: @4
+  // Strip @N cycle suffix
   let cycles = 2;
-  let body = trimmed;
   const cycleMatch = body.match(/\s*@(\d+(?:\.\d+)?)\s*$/);
-  if (cycleMatch) {
-    cycles = parseFloat(cycleMatch[1]);
-    body = body.slice(0, -cycleMatch[0].length).trim();
-  }
+  if (cycleMatch) { cycles = parseFloat(cycleMatch[1]); body = body.slice(0, -cycleMatch[0].length).trim(); }
 
-  // Split on | into expr and ops
+  // Split on | into expression and ops
   const parts = body.split("|").map(p => p.trim());
-  const exprStr = parts[0];
+  const exprStr = parts[0] ?? "";
   const opStrs  = parts.slice(1);
 
-  // Try to parse — return null if it doesn't look like a pattern
-  let expr: Expr;
-  let refs: string[] = [];
-  try {
-    const result = parseExpr(exprStr);
-    expr = result.expr;
-    refs = result.refs;
-  } catch {
-    return null; // not a pattern we recognize
+  const refs: string[] = [];
+
+  // Try merge first
+  let items = detectMerge(exprStr, refs);
+  if (!items) {
+    try {
+      const sc = new Scanner(exprStr);
+      items = parseItems(sc, "", refs);
+    } catch {
+      return null; // not a pattern we recognize
+    }
   }
+
+  if (items.length === 0) return null;
 
   const ops: Op[] = [];
   for (const opStr of opStrs) {
     if (!opStr) continue;
-    try {
-      ops.push(parseOp(opStr));
-    } catch (e) {
-      console.warn(`[streusel] skipping unknown op: "${opStr}"`);
-    }
+    try { ops.push(parseOp(opStr)); }
+    catch (e) { console.warn(`[streusel] skipping op: "${opStr}"`); }
   }
 
-  return { expr, ops, cycles, refs };
+  return { items, ops, cycles, refs };
 }

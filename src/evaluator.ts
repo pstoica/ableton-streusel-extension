@@ -1,92 +1,195 @@
-/**
- * Evaluates a parsed Streusel clip expression into NoteDescription[].
- * Pure Node, no Ableton SDK deps except the NoteDescription type.
- */
 import type { NoteDescription } from "@ableton-extensions/sdk";
-import type { ParsedClip, Expr, Op, Token } from "./parser.js";
+import type { ParsedClip, Weighted, Atom, Op } from "./parser.js";
 import * as Ops from "./ops.js";
 
 export interface ProjectKey {
-  rootNote: number;         // 0–11
-  scaleIntervals: number[]; // semitone offsets from root
+  rootNote: number;
+  scaleIntervals: number[];
   bpm: number;
 }
 
 export interface ClipStore {
-  /** Resolve a clip name to its already-evaluated notes (from dependency graph) */
   get(name: string): NoteDescription[] | undefined;
 }
 
-const BEATS_PER_CYCLE = 4; // assume 4/4
+const BEATS_PER_CYCLE = 4;
 
-// ─── Note name → MIDI ────────────────────────────────────────────────────────
-const NOTE_MAP: Record<string, number> = {
-  c:0, "c#":1, db:1, d:2, "d#":3, eb:3, e:4, f:5,
-  "f#":6, gb:6, g:7, "g#":8, ab:8, a:9, "a#":10, bb:10, b:11,
+// ─── Note name → MIDI ─────────────────────────────────────────────────────────
+const PC: Record<string, number> = {
+  c:0,"c#":1,db:1,d:2,"d#":3,eb:3,e:4,f:5,"f#":6,gb:6,g:7,"g#":8,ab:8,a:9,"a#":10,bb:10,b:11,
 };
-function noteNameToMidi(name: string): number {
+function noteToMidi(name: string): number {
   const m = name.toLowerCase().match(/^([a-g][#b]?)(-?\d+)$/);
   if (!m) throw new Error(`Bad note: ${name}`);
-  const pc = NOTE_MAP[m[1]];
+  const pc = PC[m[1]];
   if (pc === undefined) throw new Error(`Unknown pitch class: ${m[1]}`);
   return pc + (parseInt(m[2]) + 1) * 12;
 }
 
-// ─── Scale degree → MIDI ─────────────────────────────────────────────────────
-function degreeToMidi(degree: number, key: ProjectKey): number {
+function degreeToMidi(deg: number, key: ProjectKey): number {
   const { rootNote, scaleIntervals } = key;
   const len = scaleIntervals.length;
-  const octave = Math.floor(degree / len);
-  const idx = ((degree % len) + len) % len;
-  return 60 + rootNote + (scaleIntervals[idx] ?? 0) + octave * 12;
+  const oct = Math.floor(deg / len);
+  const idx = ((deg % len) + len) % len;
+  return 60 + rootNote + (scaleIntervals[idx] ?? 0) + oct * 12;
 }
 
-// ─── Token → NoteDescription ─────────────────────────────────────────────────
-function tokenToNote(token: Token, startTime: number, duration: number, key: ProjectKey): NoteDescription | null {
-  if (token.kind === "rest") return null;
-  const pitch = token.kind === "note"
-    ? noteNameToMidi(token.name)
-    : degreeToMidi(token.value, key);
-  return { pitch: Math.max(0, Math.min(127, pitch)), startTime, duration, velocity: 90 };
+// ─── Bjorklund ────────────────────────────────────────────────────────────────
+function bjorklund(pulses: number, steps: number): boolean[] {
+  if (pulses >= steps) return Array(steps).fill(true);
+  if (pulses === 0)    return Array(steps).fill(false);
+  let pat: boolean[][] = [
+    ...Array(pulses).fill(0).map(() => [true]),
+    ...Array(steps - pulses).fill(0).map(() => [false]),
+  ];
+  let remainder = steps - pulses;
+  while (remainder > 1) {
+    const groups = Math.min(pulses, remainder);
+    const next: boolean[][] = [];
+    for (let i = 0; i < groups; i++)
+      next.push([...(pat[i] ?? []), ...(pat[pat.length - 1 - i] ?? [])]);
+    if (pulses > remainder)
+      for (let i = remainder; i < pulses; i++) next.push(pat[i] ?? []);
+    else
+      for (let i = pulses; i < pat.length - groups; i++) next.push(pat[i] ?? []);
+    pulses    = Math.min(pulses, remainder);
+    remainder = Math.abs(pat.length - groups * 2);
+    pat = next;
+  }
+  return pat.flat();
 }
 
-// ─── Expression evaluator ────────────────────────────────────────────────────
-function evalExpr(expr: Expr, cycles: number, key: ProjectKey, store: ClipStore): NoteDescription[] {
-  const totalBeats = cycles * BEATS_PER_CYCLE;
+// ─── Expand *N / !N ───────────────────────────────────────────────────────────
+/** Expand a Weighted list: *N → N copies; !N → weight slot (handled in time slice). */
+function expand(ws: Weighted[]): Weighted[] {
+  const out: Weighted[] = [];
+  for (const w of ws) {
+    for (let i = 0; i < w.repeat; i++) out.push({ ...w, repeat: 1 });
+  }
+  return out;
+}
 
-  switch (expr.type) {
+/** Total weight of a list (for time distribution). */
+function totalWeight(ws: Weighted[]): number {
+  return ws.reduce((s, w) => s + w.weight, 0);
+}
+
+// ─── Core recursive evaluator ─────────────────────────────────────────────────
+
+function evalAtom(
+  atom: Atom,
+  startTime: number,
+  duration: number,
+  cycle: number,
+  key: ProjectKey,
+  store: ClipStore,
+): NoteDescription[] {
+  switch (atom.kind) {
+    case "note":
+      return [{ pitch: clamp(noteToMidi(atom.name), 0, 127), startTime, duration: duration * 0.9, velocity: 90 }];
+
+    case "degree":
+      return [{ pitch: clamp(degreeToMidi(atom.value, key), 0, 127), startTime, duration: duration * 0.9, velocity: 90 }];
+
+    case "rest":
+      return [];
+
+    case "ref": {
+      const src = store.get(atom.name);
+      if (!src) throw new Error(`[${atom.name}] not found`);
+      // Scale source clip to fit duration
+      const srcLen = Ops.totalBeats(src);
+      if (srcLen === 0) return [];
+      const scale = duration / srcLen;
+      return src.map(n => ({
+        ...n,
+        startTime: startTime + n.startTime * scale,
+        duration:  n.duration  * scale,
+      }));
+    }
+
     case "seq": {
-      const stepDur = totalBeats / expr.items.length;
+      const expanded = expand(atom.items);
+      const tw = totalWeight(expanded);
+      if (tw === 0) return [];
+      let t = startTime;
       const notes: NoteDescription[] = [];
-      expr.items.forEach((token, i) => {
-        const note = tokenToNote(token, i * stepDur, stepDur * 0.9, key);
-        if (note) notes.push(note);
+      for (const w of expanded) {
+        const dur = (w.weight / tw) * duration;
+        if (!w.optional || Math.random() < 0.5) {
+          notes.push(...evalAtom(w.atom, t, dur, cycle, key, store));
+        }
+        t += dur;
+      }
+      return notes;
+    }
+
+    case "alt": {
+      if (atom.choices.length === 0) return [];
+      const choice = atom.choices[cycle % atom.choices.length] ?? [];
+      return evalItems(choice, startTime, duration, cycle, key, store);
+    }
+
+    case "poly": {
+      // Distribute items over `steps` evenly-spaced slots
+      const items = expand(atom.items);
+      if (items.length === 0 || atom.steps === 0) return [];
+      const slotDur = duration / atom.steps;
+      const notes: NoteDescription[] = [];
+      for (let i = 0; i < atom.steps; i++) {
+        const item = items[i % items.length];
+        if (!item) continue;
+        if (item.optional && Math.random() >= 0.5) continue;
+        notes.push(...evalAtom(item.atom, startTime + i * slotDur, slotDur * 0.9, cycle, key, store));
+      }
+      return notes;
+    }
+
+    case "euclid": {
+      const pattern = bjorklund(atom.pulses, atom.steps);
+      const slotDur = duration / atom.steps;
+      const pitch   = clamp(60 + key.rootNote, 0, 127);
+      const notes: NoteDescription[] = [];
+      pattern.forEach((hit, i) => {
+        if (hit) notes.push({ pitch, startTime: startTime + i * slotDur, duration: slotDur * 0.9, velocity: 90 });
       });
       return notes;
     }
 
-    case "ref": {
-      const resolved = store.get(expr.name);
-      if (!resolved) throw new Error(`[${expr.name}] not found — check clip name exists and was evaluated first`);
-      return resolved;
-    }
-
     case "merge": {
-      const left  = evalExpr(expr.left,  cycles, key, store);
-      const right = evalExpr(expr.right, cycles, key, store);
+      const left  = evalItems(atom.left,  startTime, duration, cycle, key, store);
+      const right = evalItems(atom.right, startTime, duration, cycle, key, store);
       return Ops.merge(left, right);
-    }
-
-    case "euclid": {
-      // Default to root note, 1 beat per cycle, 90 velocity
-      const pitch = 60 + key.rootNote;
-      return Ops.euclid(expr.pulses, expr.steps, totalBeats, pitch, 90);
     }
   }
 }
 
-// ─── Apply operations ────────────────────────────────────────────────────────
-function applyOp(notes: NoteDescription[], op: Op, cycles: number): NoteDescription[] {
+function evalItems(
+  items: Weighted[],
+  startTime: number,
+  duration: number,
+  cycle: number,
+  key: ProjectKey,
+  store: ClipStore,
+): NoteDescription[] {
+  const expanded = expand(items);
+  const tw = totalWeight(expanded);
+  if (tw === 0) return [];
+  let t = startTime;
+  const notes: NoteDescription[] = [];
+  for (const w of expanded) {
+    const dur = (w.weight / tw) * duration;
+    if (!w.optional || Math.random() < 0.5) {
+      notes.push(...evalAtom(w.atom, t, dur, cycle, key, store));
+    }
+    t += dur;
+  }
+  return notes;
+}
+
+// ─── Apply operations (same as before) ───────────────────────────────────────
+
+function applyOp(notes: NoteDescription[], op: Op): NoteDescription[] {
   switch (op.op) {
     case "rev":     return Ops.rev(notes);
     case "sort":    return Ops.sort(notes);
@@ -99,18 +202,35 @@ function applyOp(notes: NoteDescription[], op: Op, cycles: number): NoteDescript
     case "skip":    return Ops.skip(notes, op.value);
     case "vel":     return Ops.vel(notes, op.value);
     case "every":
-      return Ops.every(notes, op.n, BEATS_PER_CYCLE, (ns) => applyOp(ns, op.inner, 1));
+      return Ops.every(notes, op.n, BEATS_PER_CYCLE, ns => applyOp(ns, op.inner));
   }
 }
 
-// ─── Main entry ──────────────────────────────────────────────────────────────
+// ─── Main entry ───────────────────────────────────────────────────────────────
+
 export function evaluate(parsed: ParsedClip, key: ProjectKey, store: ClipStore): NoteDescription[] {
-  let notes = evalExpr(parsed.expr, parsed.cycles, key, store);
-  for (const op of parsed.ops) {
-    notes = applyOp(notes, op, parsed.cycles);
+  // Evaluate cycle by cycle so alternation <> can advance per cycle
+  const allNotes: NoteDescription[] = [];
+  for (let c = 0; c < parsed.cycles; c++) {
+    const cycleNotes = evalItems(
+      parsed.items,
+      c * BEATS_PER_CYCLE,
+      BEATS_PER_CYCLE,
+      c,
+      key,
+      store,
+    );
+    allNotes.push(...cycleNotes);
   }
-  // Clamp all pitches just in case transforms pushed out of range
+
+  let notes = allNotes;
+  for (const op of parsed.ops) notes = applyOp(notes, op);
+
   return notes
-    .map(n => ({ ...n, pitch: Math.max(0, Math.min(127, n.pitch ?? 60)) }))
-    .filter(n => n.duration > 0);
+    .map(n => ({ ...n, pitch: clamp(n.pitch ?? 60, 0, 127) }))
+    .filter(n => n.duration > 0.01);
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
 }
