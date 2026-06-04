@@ -44,14 +44,32 @@ export function add(notes: Notes, semitones: number): Notes {
   return notes.map(n => ({ ...n, pitch: clamp((n.pitch ?? 60) + Math.round(semitones), 0, 127) }));
 }
 
-/** Halve speed (stretch durations and start times by factor) */
+/** Slow: stretch the pattern by factor (each note is factor times longer). */
 export function slow(notes: Notes, factor: number): Notes {
   return notes.map(n => ({ ...n, startTime: n.startTime * factor, duration: n.duration * factor }));
 }
 
-/** Double speed (compress) */
+/**
+ * Fast: play the pattern N times within the same total duration (repeating to fill).
+ * fast(2) on [0 1 2 3] over 4 beats → [0 1 2 3 0 1 2 3] each note 0.5 beats long.
+ * This matches Tidal/Strudel semantics: fast n = n repetitions per cycle.
+ */
 export function fast(notes: Notes, factor: number): Notes {
-  return notes.map(n => ({ ...n, startTime: n.startTime / factor, duration: n.duration / factor }));
+  if (factor <= 0 || notes.length === 0) return notes;
+  const total = totalBeats(notes);
+  if (total === 0) return notes;
+  const period = total / factor;   // duration of each repetition
+  const result: NoteDescription[] = [];
+  for (let rep = 0; rep < Math.round(factor); rep++) {
+    for (const n of notes) {
+      result.push({
+        ...n,
+        startTime: Math.round((rep * period + n.startTime / factor) * 1e9) / 1e9,
+        duration:  n.duration / factor,
+      });
+    }
+  }
+  return result.sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0));
 }
 
 /** Keep first N notes */
