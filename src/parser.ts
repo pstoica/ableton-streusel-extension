@@ -43,17 +43,20 @@ export interface Weighted {
   optional: boolean;// ?   — 50% chance of playing
 }
 
+// Op argument: scalar, "rand", or a Weighted[] pattern (sampled per-note by time)
+export type OpArg = number | "rand" | Weighted[];
+
 export type Op =
   | { op: "rev" }
   | { op: "sort" }
   | { op: "shuffle" }
   | { op: "dedup" }
-  | { op: "add";   value: number }
-  | { op: "slow";  value: number }
-  | { op: "fast";  value: number }
+  | { op: "add";   value: OpArg }
+  | { op: "slow";  value: OpArg }
+  | { op: "fast";  value: OpArg }
   | { op: "take";  value: number }
   | { op: "skip";  value: number }
-  | { op: "vel";   value: number | "rand" }
+  | { op: "vel";   value: OpArg }
   | { op: "every"; n: number; inner: Op };
 
 export interface ParsedClip {
@@ -226,27 +229,56 @@ function detectMerge(raw: string, refs: string[]): Weighted[] | null {
 
 // ─── Operation parser (unchanged) ────────────────────────────────────────────
 
+/** Parse an op argument as a pattern if it contains mini-notation, else as a number. */
+function parseOpArg(arg: string | undefined, defaultNum: number): OpArg {
+  if (!arg) return defaultNum;
+  if (arg === "rand") return "rand";
+  // Plain number?
+  if (/^-?\d+(\.\d+)?$/.test(arg)) return parseFloat(arg);
+  // Otherwise try parsing as a mini-notation pattern of numbers
+  try {
+    const sc = new Scanner(arg);
+    const items = parseItems(sc, "", []);
+    return items.length > 0 ? items : defaultNum;
+  } catch {
+    return parseFloat(arg) || defaultNum;
+  }
+}
+
 function parseOp(raw: string): Op {
-  // Support both "add=7" and "add 7" (space or = as separator)
-  const parts = raw.trim().includes("=")
-    ? raw.trim().split("=").map(s => s.trim())
-    : raw.trim().split(/\s+/);
-  const [name, arg] = parts;
-  switch ((name ?? "").toLowerCase()) {
+  // Support both "add=<0 7>" and "add <0 7>" (= or space as separator)
+  // We can't just split on = since the arg might contain = inside patterns (unlikely but safe to handle)
+  // Split on first = or first whitespace
+  const trimmed = raw.trim();
+  const eqIdx = trimmed.indexOf("=");
+  const spIdx = trimmed.search(/\s/);
+  let name: string, argStr: string | undefined;
+  if (eqIdx > 0 && (spIdx < 0 || eqIdx <= spIdx)) {
+    name   = trimmed.slice(0, eqIdx).trim();
+    argStr = trimmed.slice(eqIdx + 1).trim();
+  } else if (spIdx > 0) {
+    name   = trimmed.slice(0, spIdx).trim();
+    argStr = trimmed.slice(spIdx).trim();
+  } else {
+    name = trimmed;
+  }
+
+  switch (name.toLowerCase()) {
     case "rev":     return { op: "rev" };
     case "sort":    return { op: "sort" };
     case "shuffle": return { op: "shuffle" };
     case "dedup":   return { op: "dedup" };
-    case "add":     return { op: "add",  value: parseFloat(arg ?? "0") };
-    case "slow":    return { op: "slow", value: parseFloat(arg ?? "2") };
-    case "fast":    return { op: "fast", value: parseFloat(arg ?? "2") };
-    case "take":    return { op: "take", value: parseInt(arg ?? "4") };
-    case "skip":    return { op: "skip", value: parseInt(arg ?? "2") };
-    case "vel":
-      return { op: "vel", value: arg === "rand" ? "rand" : parseInt(arg ?? "90") };
+    case "add":     return { op: "add",  value: parseOpArg(argStr, 0) };
+    case "slow":    return { op: "slow", value: parseOpArg(argStr, 2) };
+    case "fast":    return { op: "fast", value: parseOpArg(argStr, 2) };
+    case "take":    return { op: "take", value: parseInt(argStr ?? "4") };
+    case "skip":    return { op: "skip", value: parseInt(argStr ?? "2") };
+    case "vel":     return { op: "vel",  value: parseOpArg(argStr ?? "rand", 90) };
     case "every": {
-      const [nStr, ...rest] = (arg ?? "2:rev").split(":");
-      return { op: "every", n: parseInt(nStr ?? "2"), inner: parseOp(rest.join(":")) };
+      const colonIdx = (argStr ?? "").indexOf(":");
+      const nStr = colonIdx >= 0 ? argStr!.slice(0, colonIdx) : argStr ?? "2";
+      const rest = colonIdx >= 0 ? argStr!.slice(colonIdx + 1) : "rev";
+      return { op: "every", n: parseInt(nStr), inner: parseOp(rest) };
     }
     default:
       throw new Error(`Unknown operation: "${name}"`);

@@ -1,5 +1,5 @@
 import type { NoteDescription } from "@ableton-extensions/sdk";
-import type { ParsedClip, Weighted, Atom, Op } from "./parser.js";
+import type { ParsedClip, Weighted, Atom, Op, OpArg } from "./parser.js";
 import * as Ops from "./ops.js";
 
 export interface ProjectKey {
@@ -187,22 +187,87 @@ function evalItems(
   return notes;
 }
 
-// ─── Apply operations (same as before) ───────────────────────────────────────
+// ─── Pattern arg sampling ─────────────────────────────────────────────────────
 
-function applyOp(notes: NoteDescription[], op: Op): NoteDescription[] {
+/**
+ * Sample a numeric value from a Weighted[] pattern at a given beat position.
+ * relPos: 0–1 position within the current time span.
+ * cycle: which cycle (for alternation <> advancement).
+ */
+function sampleNumAt(items: Weighted[], relPos: number, cycle: number): number {
+  const expanded = expand(items);
+  const tw = totalWeight(expanded);
+  if (tw === 0) return 0;
+  let cum = 0;
+  for (const w of expanded) {
+    const next = cum + w.weight / tw;
+    if (relPos < next || next >= 1 - 1e-9) {
+      const inner = (relPos - cum) / (w.weight / tw);
+      return atomNumAt(w.atom, inner, cycle);
+    }
+    cum = next;
+  }
+  return 0;
+}
+
+function atomNumAt(atom: Atom, relPos: number, cycle: number): number {
+  switch (atom.kind) {
+    case "degree": return atom.value;
+    case "rest":   return 0;
+    case "seq":    return sampleNumAt(atom.items, relPos, cycle);
+    case "alt": {
+      const ch = atom.choices[cycle % atom.choices.length] ?? [];
+      return sampleNumAt(ch, relPos, cycle);
+    }
+    default: return 0; // refs, euclid, poly, merge not supported as numeric args
+  }
+}
+
+/** Resolve an OpArg to a scalar for a specific note's time position. */
+function resolveArg(arg: OpArg, note: NoteDescription, totalBeats: number): number {
+  if (typeof arg === "number") return arg;
+  if (arg === "rand") return Math.floor(40 + Math.random() * 87);
+  // Pattern: sample at note's position
+  const cycle = Math.floor(note.startTime / BEATS_PER_CYCLE);
+  const cyclePos = totalBeats > 0
+    ? ((note.startTime % BEATS_PER_CYCLE) / BEATS_PER_CYCLE)
+    : 0;
+  return sampleNumAt(arg, cyclePos, cycle);
+}
+
+// ─── Apply operations ─────────────────────────────────────────────────────────
+
+function applyOp(notes: NoteDescription[], op: Op, totalBeats: number): NoteDescription[] {
   switch (op.op) {
     case "rev":     return Ops.rev(notes);
     case "sort":    return Ops.sort(notes);
     case "shuffle": return Ops.shuffle(notes);
     case "dedup":   return Ops.dedup(notes);
-    case "add":     return Ops.add(notes, op.value);
-    case "slow":    return Ops.slow(notes, op.value);
-    case "fast":    return Ops.fast(notes, op.value);
     case "take":    return Ops.take(notes, op.value);
     case "skip":    return Ops.skip(notes, op.value);
-    case "vel":     return Ops.vel(notes, op.value);
+
+    // Scalar ops that support pattern args — sample per note
+    case "add":
+      return notes.map(n => ({
+        ...n, pitch: clamp((n.pitch ?? 60) + Math.round(resolveArg(op.value, n, totalBeats)), 0, 127),
+      }));
+    case "vel":
+      return notes.map(n => {
+        const v = resolveArg(op.value, n, totalBeats);
+        return { ...n, velocity: clamp(Math.round(v), 1, 127) };
+      });
+    case "slow": {
+      // If pattern arg, treat per-note duration scaling isn't meaningful; fall back to scalar mean
+      if (typeof op.value !== "number") return Ops.slow(notes, resolveArg(op.value, notes[0] ?? { startTime: 0, duration: 1, pitch: 60 }, totalBeats));
+      return Ops.slow(notes, op.value);
+    }
+    case "fast": {
+      if (typeof op.value !== "number") return Ops.fast(notes, resolveArg(op.value, notes[0] ?? { startTime: 0, duration: 1, pitch: 60 }, totalBeats));
+      return Ops.fast(notes, op.value);
+    }
+
     case "every":
-      return Ops.every(notes, op.n, BEATS_PER_CYCLE, ns => applyOp(ns, op.inner));
+      return Ops.every(notes, op.n, BEATS_PER_CYCLE, ns => applyOp(ns, op.inner, totalBeats));
   }
 }
 
@@ -223,8 +288,9 @@ export function evaluate(parsed: ParsedClip, key: ProjectKey, store: ClipStore):
     allNotes.push(...cycleNotes);
   }
 
+  const totalBeats = parsed.cycles * BEATS_PER_CYCLE;
   let notes = allNotes;
-  for (const op of parsed.ops) notes = applyOp(notes, op);
+  for (const op of parsed.ops) notes = applyOp(notes, op, totalBeats);
 
   return notes
     .map(n => ({ ...n, pitch: clamp(n.pitch ?? 60, 0, 127) }))
