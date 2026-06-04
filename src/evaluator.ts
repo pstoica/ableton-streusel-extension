@@ -227,7 +227,6 @@ function atomNumAt(atom: Atom, relPos: number, cycle: number): number {
 function resolveArg(arg: OpArg, note: NoteDescription, totalBeats: number): number {
   if (typeof arg === "number") return arg;
   if (arg === "rand") return Math.floor(40 + Math.random() * 87);
-  // Pattern: sample at note's position
   const cycle = Math.floor(note.startTime / BEATS_PER_CYCLE);
   const cyclePos = totalBeats > 0
     ? ((note.startTime % BEATS_PER_CYCLE) / BEATS_PER_CYCLE)
@@ -235,9 +234,29 @@ function resolveArg(arg: OpArg, note: NoteDescription, totalBeats: number): numb
   return sampleNumAt(arg, cyclePos, cycle);
 }
 
+/**
+ * Add N scale degrees to a MIDI note — stays in key.
+ * Notes not exactly on a scale degree snap to nearest before shifting.
+ */
+function addDegrees(midi: number, n: number, key: ProjectKey): number {
+  const { rootNote, scaleIntervals } = key;
+  const len = scaleIntervals.length;
+  const rel = midi - 60 - rootNote;
+  const oct = Math.floor(rel / 12);
+  const semi = ((rel % 12) + 12) % 12;
+  // Find nearest scale degree index in current octave
+  let deg = 0, bestDist = 13;
+  scaleIntervals.forEach((s, i) => {
+    const d = Math.abs(s - semi);
+    if (d < bestDist) { bestDist = d; deg = i; }
+  });
+  const absDeg = oct * len + deg + Math.round(n);
+  return degreeToMidi(absDeg, key);
+}
+
 // ─── Apply operations ─────────────────────────────────────────────────────────
 
-function applyOp(notes: NoteDescription[], op: Op, totalBeats: number): NoteDescription[] {
+function applyOp(notes: NoteDescription[], op: Op, totalBeats: number, key: ProjectKey): NoteDescription[] {
   switch (op.op) {
     case "rev":     return Ops.rev(notes);
     case "sort":    return Ops.sort(notes);
@@ -246,8 +265,12 @@ function applyOp(notes: NoteDescription[], op: Op, totalBeats: number): NoteDesc
     case "take":    return Ops.take(notes, op.value);
     case "skip":    return Ops.skip(notes, op.value);
 
-    // Scalar ops that support pattern args — sample per note
+    // add = scale-degree arithmetic (stays in key); semitones = chromatic
     case "add":
+      return notes.map(n => ({
+        ...n, pitch: clamp(addDegrees(n.pitch ?? 60, resolveArg(op.value, n, totalBeats), key), 0, 127),
+      }));
+    case "semitones":
       return notes.map(n => ({
         ...n, pitch: clamp((n.pitch ?? 60) + Math.round(resolveArg(op.value, n, totalBeats)), 0, 127),
       }));
@@ -267,7 +290,7 @@ function applyOp(notes: NoteDescription[], op: Op, totalBeats: number): NoteDesc
     }
 
     case "every":
-      return Ops.every(notes, op.n, BEATS_PER_CYCLE, ns => applyOp(ns, op.inner, totalBeats));
+      return Ops.every(notes, op.n, BEATS_PER_CYCLE, ns => applyOp(ns, op.inner, totalBeats, key));
   }
 }
 
@@ -290,7 +313,7 @@ export function evaluate(parsed: ParsedClip, key: ProjectKey, store: ClipStore):
 
   const totalBeats = parsed.cycles * BEATS_PER_CYCLE;
   let notes = allNotes;
-  for (const op of parsed.ops) notes = applyOp(notes, op, totalBeats);
+  for (const op of parsed.ops) notes = applyOp(notes, op, totalBeats, key);
 
   return notes
     .map(n => ({ ...n, pitch: clamp(n.pitch ?? 60, 0, 127) }))

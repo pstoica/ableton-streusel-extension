@@ -51,7 +51,8 @@ export type Op =
   | { op: "sort" }
   | { op: "shuffle" }
   | { op: "dedup" }
-  | { op: "add";   value: OpArg }
+  | { op: "add";      value: OpArg }  // scale-degree shift (stays in key)
+  | { op: "semitones"; value: OpArg } // chromatic semitone shift
   | { op: "slow";  value: OpArg }
   | { op: "fast";  value: OpArg }
   | { op: "take";  value: number }
@@ -271,7 +272,8 @@ function parseOp(raw: string): Op {
     case "sort":    return { op: "sort" };
     case "shuffle": return { op: "shuffle" };
     case "dedup":   return { op: "dedup" };
-    case "add":     return { op: "add",  value: parseOpArg(argStr, 0) };
+    case "add":       return { op: "add",       value: parseOpArg(argStr, 0) };
+    case "semitones": return { op: "semitones", value: parseOpArg(argStr, 0) };
     case "slow":    return { op: "slow", value: parseOpArg(argStr, 2) };
     case "fast":    return { op: "fast", value: parseOpArg(argStr, 2) };
     case "take":    return { op: "take", value: parseInt(argStr ?? "4") };
