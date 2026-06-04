@@ -1,6 +1,8 @@
 # Streusel
 
-A clip-name pattern language for Ableton Live. Write patterns in clip names, right-click to evaluate. Inspired by [mutateful](https://github.com/carrierdown/mutateful).
+A clip-name pattern language for Ableton Live, built with the [Ableton Extensions SDK](https://www.ableton.com/en/extensions/). Write patterns in clip names, right-click to evaluate. Clips can reference each other by name — change a source clip and all dependent clips rebuild automatically.
+
+Inspired by [mutateful](https://github.com/carrierdown/mutateful), [TidalCycles](https://tidalcycles.org), and [Strudel](https://strudel.cc). The mini-notation syntax (`0 2 4`, `[Ref] | rev | add=7`) is loosely modelled on Tidal/Strudel's pattern language, but implemented entirely in TypeScript running natively in Node — no browser context, no webview, no CDN. Patterns evaluate in milliseconds.
 
 ## Clip name syntax
 
