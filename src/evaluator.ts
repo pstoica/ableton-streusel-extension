@@ -14,6 +14,13 @@ export interface ClipStore {
 
 const BEATS_PER_CYCLE = 4;
 
+/**
+ * Default note gate: fraction of each slot a note occupies.
+ * 1.0 = fill the slot exactly (even spread, no gaps, no hangover into the next note).
+ * Override per-clip with `| gate G` (e.g. `| gate 0.5` for staccato).
+ */
+const DEFAULT_GATE = 1.0;
+
 // ─── Note name → MIDI ─────────────────────────────────────────────────────────
 const PC: Record<string, number> = {
   c:0,"c#":1,db:1,d:2,"d#":3,eb:3,e:4,f:5,"f#":6,gb:6,g:7,"g#":8,ab:8,a:9,"a#":10,bb:10,b:11,
@@ -83,13 +90,17 @@ function evalAtom(
   cycle: number,
   key: ProjectKey,
   store: ClipStore,
+  chromatic: boolean,
 ): NoteDescription[] {
   switch (atom.kind) {
     case "note":
-      return [{ pitch: clamp(noteToMidi(atom.name), 0, 127), startTime, duration: duration * 0.9, velocity: 90 }];
+      return [{ pitch: clamp(noteToMidi(atom.name), 0, 127), startTime, duration: duration * DEFAULT_GATE, velocity: 90 }];
 
-    case "degree":
-      return [{ pitch: clamp(degreeToMidi(atom.value, key), 0, 127), startTime, duration: duration * 0.9, velocity: 90 }];
+    case "degree": {
+      // chromatic mode: number is a semitone offset from the root; else a scale degree
+      const pitch = chromatic ? 60 + key.rootNote + atom.value : degreeToMidi(atom.value, key);
+      return [{ pitch: clamp(pitch, 0, 127), startTime, duration: duration * DEFAULT_GATE, velocity: 90 }];
+    }
 
     case "rest":
       return [];
@@ -117,7 +128,9 @@ function evalAtom(
       for (const w of expanded) {
         const dur = (w.weight / tw) * duration;
         if (!w.optional || Math.random() < 0.5) {
-          notes.push(...evalAtom(w.atom, t, dur, cycle, key, store));
+          let sub = evalAtom(w.atom, t, dur, cycle, key, store, chromatic);
+          if (w.ratchet > 1) sub = Ops.ratchet(sub, w.ratchet);
+          notes.push(...sub);
         }
         t += dur;
       }
@@ -127,7 +140,7 @@ function evalAtom(
     case "alt": {
       if (atom.choices.length === 0) return [];
       const choice = atom.choices[cycle % atom.choices.length] ?? [];
-      return evalItems(choice, startTime, duration, cycle, key, store);
+      return evalItems(choice, startTime, duration, cycle, key, store, chromatic);
     }
 
     case "poly": {
@@ -140,7 +153,9 @@ function evalAtom(
         const item = items[i % items.length];
         if (!item) continue;
         if (item.optional && Math.random() >= 0.5) continue;
-        notes.push(...evalAtom(item.atom, startTime + i * slotDur, slotDur * 0.9, cycle, key, store));
+        let sub = evalAtom(item.atom, startTime + i * slotDur, slotDur, cycle, key, store, chromatic);
+        if (item.ratchet > 1) sub = Ops.ratchet(sub, item.ratchet);
+        notes.push(...sub);
       }
       return notes;
     }
@@ -151,14 +166,14 @@ function evalAtom(
       const pitch   = clamp(60 + key.rootNote, 0, 127);
       const notes: NoteDescription[] = [];
       pattern.forEach((hit, i) => {
-        if (hit) notes.push({ pitch, startTime: startTime + i * slotDur, duration: slotDur * 0.9, velocity: 90 });
+        if (hit) notes.push({ pitch, startTime: startTime + i * slotDur, duration: slotDur * DEFAULT_GATE, velocity: 90 });
       });
       return notes;
     }
 
     case "merge": {
-      const left  = evalItems(atom.left,  startTime, duration, cycle, key, store);
-      const right = evalItems(atom.right, startTime, duration, cycle, key, store);
+      const left  = evalItems(atom.left,  startTime, duration, cycle, key, store, chromatic);
+      const right = evalItems(atom.right, startTime, duration, cycle, key, store, chromatic);
       return Ops.merge(left, right);
     }
   }
@@ -171,6 +186,7 @@ function evalItems(
   cycle: number,
   key: ProjectKey,
   store: ClipStore,
+  chromatic: boolean,
 ): NoteDescription[] {
   const expanded = expand(items);
   const tw = totalWeight(expanded);
@@ -180,7 +196,9 @@ function evalItems(
   for (const w of expanded) {
     const dur = (w.weight / tw) * duration;
     if (!w.optional || Math.random() < 0.5) {
-      notes.push(...evalAtom(w.atom, t, dur, cycle, key, store));
+      let sub = evalAtom(w.atom, t, dur, cycle, key, store, chromatic);
+      if (w.ratchet > 1) sub = Ops.ratchet(sub, w.ratchet);
+      notes.push(...sub);
     }
     t += dur;
   }
@@ -279,14 +297,27 @@ function applyOp(notes: NoteDescription[], op: Op, totalBeats: number, key: Proj
         const v = resolveArg(op.value, n, totalBeats);
         return { ...n, velocity: clamp(Math.round(v), 1, 127) };
       });
+    case "gate":
+      // Scale each note's length: <1 shortens (gaps/staccato), 1 fills the slot, >1 overlaps.
+      return notes.map(n => {
+        const g = op.value === "rand" ? 0.2 + Math.random() * 0.8 : resolveArg(op.value, n, totalBeats);
+        return { ...n, duration: Math.max(0.001, n.duration * g) };
+      });
+    case "ratchet": {
+      if (typeof op.value === "number" || op.value === "rand") return Ops.ratchet(notes, op.value);
+      // Pattern arg: resolve a per-note count (e.g. ratchet <1 4> alternates per cycle)
+      return notes.flatMap(n => Ops.ratchet([n], Math.max(1, Math.round(resolveArg(op.value, n, totalBeats)))));
+    }
     case "slow": {
       // If pattern arg, treat per-note duration scaling isn't meaningful; fall back to scalar mean
       if (typeof op.value !== "number") return Ops.slow(notes, resolveArg(op.value, notes[0] ?? { startTime: 0, duration: 1, pitch: 60 }, totalBeats));
       return Ops.slow(notes, op.value);
     }
     case "fast": {
-      if (typeof op.value !== "number") return Ops.fast(notes, resolveArg(op.value, notes[0] ?? { startTime: 0, duration: 1, pitch: 60 }, totalBeats));
-      return Ops.fast(notes, op.value);
+      const f = typeof op.value === "number"
+        ? op.value
+        : resolveArg(op.value, notes[0] ?? { startTime: 0, duration: 1, pitch: 60 }, totalBeats);
+      return Ops.fast(notes, f, BEATS_PER_CYCLE);
     }
 
     case "every":
@@ -307,6 +338,7 @@ export function evaluate(parsed: ParsedClip, key: ProjectKey, store: ClipStore):
       c,
       key,
       store,
+      parsed.chromatic,
     );
     allNotes.push(...cycleNotes);
   }

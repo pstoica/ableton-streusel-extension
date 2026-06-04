@@ -2,7 +2,12 @@
  * Streusel mini-notation parser — recursive descent.
  *
  * Clip name format:
- *   <expr> [| <op>]* [@<cycles>]
+ *   [n:] <expr> [| <op>]* [@<cycles>]
+ *
+ * Leading flag:
+ *   n:              chromatic mode — bare numbers are semitone offsets from the
+ *                   project root (0 → MIDI 60+root), not scale degrees. Good for
+ *                   breakbeat slicing / chromatic sampler triggering.
  *
  * Expression atoms:
  *   c3 e3 g3        literal notes
@@ -19,6 +24,7 @@
  *   *N              repeat N times within the current subdivision
  *   !N  or  !       elongate — atom takes N weight slots (default 2 if bare !)
  *   ?               optional — 50% chance of playing each evaluation
+ *   ^N  or  ^        ratchet — retrigger atom N rapid hits in its slot (default 2)
  */
 
 // ─── AST types ────────────────────────────────────────────────────────────────
@@ -41,6 +47,7 @@ export interface Weighted {
   repeat: number;   // *N  — expand to N copies (default 1)
   weight: number;   // !N  — this atom takes N time slots (default 1)
   optional: boolean;// ?   — 50% chance of playing
+  ratchet: number;  // ^N  — retrigger N rapid hits within the slot (default 1)
 }
 
 // Op argument: scalar, "rand", or a Weighted[] pattern (sampled per-note by time)
@@ -58,6 +65,8 @@ export type Op =
   | { op: "take";  value: number }
   | { op: "skip";  value: number }
   | { op: "vel";   value: OpArg }
+  | { op: "gate";  value: OpArg }  // scale note length: 1 = fill slot, <1 = staccato, >1 = overlap
+  | { op: "ratchet"; value: OpArg }
   | { op: "every"; n: number; inner: Op };
 
 export interface ParsedClip {
@@ -65,6 +74,7 @@ export interface ParsedClip {
   ops: Op[];
   cycles: number;
   refs: string[];
+  chromatic: boolean; // `n:` prefix — bare numbers are chromatic semitone offsets, not scale degrees
 }
 
 // ─── Scanner ──────────────────────────────────────────────────────────────────
@@ -84,7 +94,7 @@ class Scanner {
 
   readWord(): string {
     const start = this.pos;
-    while (!this.eof() && !/[\s\[\]<>{}|@?*!%]/.test(this.peek())) this.pos++;
+    while (!this.eof() && !/[\s\[\]<>{}|@?*!%^]/.test(this.peek())) this.pos++;
     return this.src.slice(start, this.pos);
   }
 
@@ -117,8 +127,8 @@ function atomFromWord(word: string, refs: string[]): Atom {
 
 // ─── Modifier reader (after an atom or closing bracket) ───────────────────────
 
-function readModifiers(sc: Scanner): { repeat: number; weight: number; optional: boolean } {
-  let repeat = 1, weight = 1, optional = false;
+function readModifiers(sc: Scanner): { repeat: number; weight: number; optional: boolean; ratchet: number } {
+  let repeat = 1, weight = 1, optional = false, ratchet = 1;
   while (!sc.eof()) {
     const ch = sc.peek();
     if (ch === "*") {
@@ -127,6 +137,9 @@ function readModifiers(sc: Scanner): { repeat: number; weight: number; optional:
     } else if (ch === "!") {
       sc.pos++;
       weight = /\d/.test(sc.peek()) ? sc.readInt() : 2;
+    } else if (ch === "^") {
+      sc.pos++;
+      ratchet = /\d/.test(sc.peek()) ? sc.readInt() : 2;
     } else if (ch === "?") {
       sc.pos++;
       optional = true;
@@ -134,7 +147,7 @@ function readModifiers(sc: Scanner): { repeat: number; weight: number; optional:
       break;
     }
   }
-  return { repeat, weight, optional };
+  return { repeat, weight, optional, ratchet };
 }
 
 // ─── Item list parser ─────────────────────────────────────────────────────────
@@ -228,7 +241,7 @@ function detectMerge(raw: string, refs: string[]): Weighted[] | null {
   const sc1 = new Scanner(m[1] as string), sc2 = new Scanner(m[2] as string);
   const left  = parseItems(sc1, "", refs);
   const right = parseItems(sc2, "", refs);
-  return [{ atom: { kind: "merge", left, right }, repeat: 1, weight: 1, optional: false }];
+  return [{ atom: { kind: "merge", left, right }, repeat: 1, weight: 1, optional: false, ratchet: 1 }];
 }
 
 // ─── Operation parser (unchanged) ────────────────────────────────────────────
@@ -279,6 +292,9 @@ function parseOp(raw: string): Op {
     case "take":    return { op: "take", value: parseInt(argStr ?? "4") };
     case "skip":    return { op: "skip", value: parseInt(argStr ?? "2") };
     case "vel":     return { op: "vel",  value: parseOpArg(argStr ?? "rand", 90) };
+    case "gate":
+    case "len":     return { op: "gate", value: parseOpArg(argStr, 0.5) };
+    case "ratchet": return { op: "ratchet", value: parseOpArg(argStr, 2) };
     case "every": {
       const colonIdx = (argStr ?? "").indexOf(":");
       const nStr = colonIdx >= 0 ? argStr!.slice(0, colonIdx) : argStr ?? "2";
@@ -300,6 +316,11 @@ export function parse(clipName: string): ParsedClip | null {
   let cycles = 2;
   const cycleMatch = body.match(/\s*@(\d+(?:\.\d+)?)\s*$/);
   if (cycleMatch) { cycles = parseFloat(cycleMatch[1]); body = body.slice(0, -cycleMatch[0].length).trim(); }
+
+  // Leading `n:` flag → chromatic numbering (bare numbers are semitone offsets, not scale degrees)
+  let chromatic = false;
+  const chromMatch = body.match(/^n:\s*/i);
+  if (chromMatch) { chromatic = true; body = body.slice(chromMatch[0].length).trim(); }
 
   // Split on | into expression and ops
   const parts = body.split("|").map(p => p.trim());
@@ -328,5 +349,5 @@ export function parse(clipName: string): ParsedClip | null {
     catch (e) { console.warn(`[streusel] skipping op: "${opStr}"`); }
   }
 
-  return { items, ops, cycles, refs };
+  return { items, ops, cycles, refs, chromatic };
 }

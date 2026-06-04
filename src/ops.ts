@@ -50,26 +50,54 @@ export function slow(notes: Notes, factor: number): Notes {
 }
 
 /**
- * Fast: play the pattern N times within the same total duration (repeating to fill).
- * fast(2) on [0 1 2 3] over 4 beats → [0 1 2 3 0 1 2 3] each note 0.5 beats long.
- * This matches Tidal/Strudel semantics: fast n = n repetitions per cycle.
+ * Fast: within each cycle, repeat that cycle's notes `factor` times (Tidal `fast`).
+ *
+ * Operates per-cycle against the structural `cycleBeats` grid — NOT the note extent —
+ * so it lands exactly on the beat and matches the structural `[...]*N` repeat,
+ * including how <> alternation has already resolved within each cycle.
+ *   `X | fast N`  ≡  `[X]*N`
  */
-export function fast(notes: Notes, factor: number): Notes {
-  if (factor <= 0 || notes.length === 0) return notes;
+export function fast(notes: Notes, factor: number, cycleBeats: number): Notes {
+  const reps = Math.round(factor);
+  if (reps <= 1 || notes.length === 0 || cycleBeats <= 0) return notes;
   const total = totalBeats(notes);
-  if (total === 0) return notes;
-  const period = total / factor;   // duration of each repetition
+  const nCycles = Math.max(1, Math.ceil(total / cycleBeats - 1e-9));
+  const sub = cycleBeats / reps;   // length of one repetition inside a cycle
   const result: NoteDescription[] = [];
-  for (let rep = 0; rep < Math.round(factor); rep++) {
-    for (const n of notes) {
-      result.push({
-        ...n,
-        startTime: Math.round((rep * period + n.startTime / factor) * 1e9) / 1e9,
-        duration:  n.duration / factor,
-      });
+  for (let c = 0; c < nCycles; c++) {
+    const cycleStart = c * cycleBeats;
+    const chunk = notes.filter(n => n.startTime >= cycleStart - 1e-9 && n.startTime < cycleStart + cycleBeats - 1e-9);
+    for (let r = 0; r < reps; r++) {
+      for (const n of chunk) {
+        const local = n.startTime - cycleStart;            // 0 .. cycleBeats
+        const st = cycleStart + r * sub + local / reps;    // compress into the r-th sub-window
+        result.push({
+          ...n,
+          startTime: Math.round(st * 1e6) / 1e6,
+          duration:  Math.round((n.duration / reps) * 1e6) / 1e6,
+        });
+      }
     }
   }
   return result.sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0));
+}
+
+/**
+ * Ratchet: retrigger each note `count` times within its own duration (rapid-fire).
+ * ratchet(4) on a single note → 4 evenly-spaced hits filling that note's span,
+ * each with a slight gap. "rand" picks 2–5 per note.
+ */
+export function ratchet(notes: Notes, count: number | "rand"): Notes {
+  return notes.flatMap(n => {
+    const c = count === "rand" ? 2 + Math.floor(Math.random() * 4) : Math.round(count);
+    if (c <= 1) return [n];
+    const d = n.duration / c;
+    return Array.from({ length: c }, (_, i) => ({
+      ...n,
+      startTime: Math.round((n.startTime + i * d) * 1e6) / 1e6,
+      duration:  Math.round((d * 0.85) * 1e6) / 1e6,  // slight gap between hits
+    }));
+  });
 }
 
 /** Keep first N notes */
