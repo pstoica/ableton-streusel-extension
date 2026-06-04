@@ -153,6 +153,55 @@ When you evaluate a clip, Streusel scans the entire session for clips that refer
 | Clip slot selection (Cmd+click) | **Evaluate selection** |
 | Arrangement time selection | **Evaluate selection** |
 
+## Hotkey (marked clips)
+
+Live can't bind extension commands to keys directly, so Streusel exposes a tiny local
+HTTP trigger instead. Bind a global keyboard shortcut to hit it and re-evaluate every
+**marked** clip at once — handy for live performance / quick iteration without leaving
+the keyboard.
+
+**1. Mark the clips you want the hotkey to rebuild** by prefixing their name with `* `
+(asterisk + space). The prefix is stripped before parsing, so the rest is a normal
+pattern:
+
+```
+* 0 2 4 | rev @4
+* [Melody] | every 2:rev
+```
+
+**2. The extension serves the trigger on `http://127.0.0.1:7890`** (it logs the URL on
+startup). Endpoints:
+
+| URL | Action |
+|---|---|
+| `/eval` (or `/`) | Re-evaluate all marked clips, in dependency order |
+| `/ping` | Health check — returns `streusel running` |
+
+Verify it's up:
+
+```bash
+curl http://127.0.0.1:7890/ping     # → streusel running
+curl http://127.0.0.1:7890/eval     # → ok  (rebuilds marked clips)
+```
+
+**3. Bind a key to `curl -s http://127.0.0.1:7890/eval`** using any global hotkey tool.
+On macOS, for example:
+
+- **Hammerspoon** — in `~/.hammerspoon/init.lua`:
+  ```lua
+  hs.hotkey.bind({"cmd", "alt"}, "E", function()
+    hs.execute("curl -s http://127.0.0.1:7890/eval")
+  end)
+  ```
+- **Keyboard Maestro / BetterTouchTool** — add a macro that runs the shell command
+  `curl -s http://127.0.0.1:7890/eval`, triggered by your chosen key.
+- **Shortcuts.app / Automator** — a "Run Shell Script" action with the same `curl`,
+  assigned a keyboard shortcut.
+
+The trigger only listens on `127.0.0.1`, so it's local-only. If port `7890` is taken,
+the server logs a warning and the trigger is disabled (the right-click commands still
+work).
+
 ## Installation
 
 Requires:
