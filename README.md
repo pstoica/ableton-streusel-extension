@@ -98,11 +98,14 @@ overlap. Use `gate` (alias `len`) to shorten into staccato or lengthen into over
 ### Ratcheting
 
 `^N` on an atom, or `| ratchet N` as an operation, splits a note into N evenly-spaced
-rapid hits within its slot (`rand` picks 2–5). It composes with `<>` — the alternation
-resolves first, then the chosen note ratchets; or the **count** itself can alternate:
+rapid hits within its slot (`rand` picks 2–5). Hits fill their sub-slot by default;
+their length follows the gate, so chain `| gate` for staccato retriggers. It composes
+with `<>` — the alternation resolves first, then the chosen note ratchets; or the
+**count** itself can alternate:
 
 ```
-c3^4                        four rapid hits of c3 in one step
+c3^4                        four hits of c3 filling the step
+c3^4 | gate 0.6             four retriggers with gaps between them
 0 2 4 | ratchet 3           every note tripled
 <0 5>^3                     ratchets whichever note the alt picks this cycle
 0 5 | ratchet <1 3>         ratchet count alternates per cycle

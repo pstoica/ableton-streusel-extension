@@ -83,9 +83,10 @@ export function fast(notes: Notes, factor: number, cycleBeats: number): Notes {
 }
 
 /**
- * Ratchet: retrigger each note `count` times within its own duration (rapid-fire).
- * ratchet(4) on a single note → 4 evenly-spaced hits filling that note's span,
- * each with a slight gap. "rand" picks 2–5 per note.
+ * Ratchet: retrigger each note `count` times within its own footprint (rapid-fire).
+ * ratchet(4) on a note → 4 evenly-spaced hits, each filling its 1/count sub-slot
+ * exactly. Length is left to the gate (default fill); use `| gate` for staccato
+ * hits. "rand" picks 2–5 per note.
  */
 export function ratchet(notes: Notes, count: number | "rand"): Notes {
   return notes.flatMap(n => {
@@ -95,7 +96,7 @@ export function ratchet(notes: Notes, count: number | "rand"): Notes {
     return Array.from({ length: c }, (_, i) => ({
       ...n,
       startTime: Math.round((n.startTime + i * d) * 1e6) / 1e6,
-      duration:  Math.round((d * 0.85) * 1e6) / 1e6,  // slight gap between hits
+      duration:  Math.round(d * 1e6) / 1e6,
     }));
   });
 }
