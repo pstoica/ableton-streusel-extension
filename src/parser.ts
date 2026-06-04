@@ -140,10 +140,13 @@ function readModifiers(sc: Scanner): { repeat: number; weight: number; optional:
 
 function parseItems(sc: Scanner, stopAt: string, refs: string[]): Weighted[] {
   const items: Weighted[] = [];
+  // Whether whitespace itself is a stop character (e.g. inside <> choices)
+  const stopAtWS = stopAt.includes(" ") || stopAt.includes("\t") || stopAt.includes("\n");
   while (!sc.eof()) {
-    sc.skipWS();
+    // Only skip whitespace if it's not a designated stop character
+    if (!stopAtWS) sc.skipWS();
     const ch = sc.peek();
-    if (!ch || stopAt.includes(ch)) break;
+    if (!ch || stopAt.includes(ch) || (stopAtWS && /\s/.test(ch))) break;
 
     let atom: Atom;
 
