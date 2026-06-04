@@ -227,7 +227,11 @@ function detectMerge(raw: string, refs: string[]): Weighted[] | null {
 // ─── Operation parser (unchanged) ────────────────────────────────────────────
 
 function parseOp(raw: string): Op {
-  const [name, arg] = raw.trim().split("=").map(s => s.trim());
+  // Support both "add=7" and "add 7" (space or = as separator)
+  const parts = raw.trim().includes("=")
+    ? raw.trim().split("=").map(s => s.trim())
+    : raw.trim().split(/\s+/);
+  const [name, arg] = parts;
   switch ((name ?? "").toLowerCase()) {
     case "rev":     return { op: "rev" };
     case "sort":    return { op: "sort" };
