@@ -8,6 +8,7 @@
 import { parse } from "../src/parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "../src/evaluator.js";
 import { buildGraph, topoSort, dependents, type ClipNode } from "../src/resolver.js";
+import { extractPatterns, validatePatterns, buildSystemPrompt, buildUserPrompt, generatePatterns, type LlmConfig } from "../src/llm.js";
 
 const KEY: ProjectKey = { rootNote: 0, scaleIntervals: [0, 2, 4, 5, 7, 9, 11], bpm: 120 };
 const EMPTY: ClipStore = { get: () => undefined };
@@ -138,6 +139,45 @@ for (const [x, n, cyc] of FAST_CASES) {
   check("refs captured", (graph.get("[Melody] | rev") as ClipNode | undefined)?.refs.join() === "Melody");
   check("dependents finds referrers", dependents("Melody", graph).includes("[Melody] | rev"));
   check("topoSort returns all nodes", topoSort(graph).length === 2);
+}
+
+// ─── LLM generation (pure helpers + mocked provider) ───────────────────────────
+check("extractPatterns strips fences/bullets/numbering", eq(
+  extractPatterns("```\n- 0 2 4\n1. c3 e3 g3\n`0 2 | rev`\n```"),
+  ["0 2 4", "c3 e3 g3", "0 2 | rev"]), J(extractPatterns("```\n- 0 2 4\n1. c3 e3 g3\n`0 2 | rev`\n```")));
+check("validatePatterns keeps only parseable, dedups", eq(
+  validatePatterns(["0 2 4 | rev", "Here are patterns:", "0 2 4 | rev", "c3 e3 g3"]),
+  ["0 2 4 | rev", "c3 e3 g3"]));
+check("system prompt teaches grammar + key", (() => {
+  const sp = buildSystemPrompt({ rootNote: 2, scaleIntervals: [0, 2, 4, 5, 7, 9, 11], bpm: 128 });
+  return sp.includes("Streusel") && sp.includes("ratchet") && sp.includes("D") && sp.includes("128");
+})());
+check("user prompt asks for N variations", buildUserPrompt("warm arp", 3).includes("3 distinct"));
+{
+  // Mocked provider response — no network. Exercises the Anthropic + OpenAI routers.
+  const okText = "Here you go:\n```\n- 0 2 4 7 | rev @4\nnot a pattern!!\nc3 e3 g3 | gate 0.5\n```";
+  const mkFetch = (provider: "anthropic" | "openai") => (async (_url: string, init: any) => {
+    const sent = JSON.parse(init.body);
+    const payload = provider === "anthropic"
+      ? { content: [{ text: okText }] }
+      : { choices: [{ message: { content: okText } }] };
+    // sanity: each provider sends the right shape
+    const shapeOk = provider === "anthropic" ? !!sent.system : sent.messages?.[0]?.role === "system";
+    return { ok: true, status: 200, json: async () => payload, text: async () => "", _shapeOk: shapeOk } as any;
+  }) as unknown as typeof fetch;
+
+  const cfgA: LlmConfig = { provider: "anthropic", model: "m", apiKey: "k" };
+  const cfgO: LlmConfig = { provider: "openai", model: "m", apiKey: "k" };
+  const a = await generatePatterns(cfgA, "warm arp", 5, undefined, mkFetch("anthropic"));
+  const o = await generatePatterns(cfgO, "warm arp", 5, undefined, mkFetch("openai"));
+  check("anthropic router returns only valid patterns", eq(a, ["0 2 4 7 | rev @4", "c3 e3 g3 | gate 0.5"]), J(a));
+  check("openai router returns only valid patterns", eq(o, ["0 2 4 7 | rev @4", "c3 e3 g3 | gate 0.5"]), J(o));
+
+  // HTTP error surfaces
+  const errFetch = (async () => ({ ok: false, status: 401, json: async () => ({}), text: async () => "bad key" }) as any) as unknown as typeof fetch;
+  let threw = false;
+  try { await generatePatterns(cfgA, "x", 1, undefined, errFetch); } catch (e) { threw = (e as Error).message.includes("401"); }
+  check("HTTP error throws with status", threw);
 }
 
 // ─── Report ────────────────────────────────────────────────────────────────────

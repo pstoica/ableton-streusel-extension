@@ -196,9 +196,31 @@ When you evaluate a clip, Streusel scans the entire session for clips that refer
 | Context | Command |
 |---|---|
 | MIDI clip | **Evaluate + propagate** — evaluates this clip + all that reference it |
+| MIDI clip | **Generate pattern (AI)** — turn a `?`-prefixed description into a pattern |
 | MIDI track | **Evaluate all on track** — evaluates all pattern clips on the track |
+| MIDI track | **Streusel: AI settings…** — set provider / model / API key |
 | Clip slot selection (Cmd+click) | **Evaluate selection** |
 | Arrangement time selection | **Evaluate selection** |
+
+## AI generation
+
+Describe what you want in a clip name with a `?` prefix, then right-click →
+**Generate pattern (AI)**. The model writes a Streusel pattern, the clip is
+renamed to it, and the notes are evaluated. Generated patterns are validated —
+anything that doesn't parse is discarded.
+
+```
+? warm 8-note arpeggio that rises             → one pattern, in the project key
+?4 driving techno bassline                    → 4 variations
+```
+
+With `?N`, variation 1 replaces the clip and the rest fill the next empty slots
+in the same track column — so you audition them by playing the slots.
+
+**Bring your own key.** The first generate opens a dialog to pick a provider
+(Anthropic or OpenAI), model, and paste your API key. It's stored locally in the
+extension's storage directory and only sent to the provider you choose — nothing
+is bundled or shared. Change it anytime via **Streusel: AI settings…**.
 
 ## Hotkey (marked clips)
 
