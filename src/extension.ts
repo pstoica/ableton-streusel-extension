@@ -1,5 +1,7 @@
 import http from "node:http";
+import https from "node:https";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   initialize,
@@ -144,25 +146,82 @@ async function evalBatch(
 type Ctx = ReturnType<typeof initialize>;
 const CONFIG_FILE = "streusel-config.json";
 
-function configPath(context: Ctx): string | null {
-  const dir = context.environment.storageDirectory;
-  return dir ? path.join(dir, CONFIG_FILE) : null;
+/** Persistent dir for config; falls back to ~/.streusel if the host gives us none. */
+function storageDir(context: Ctx): string {
+  return context.environment.storageDirectory || path.join(os.homedir(), ".streusel");
+}
+function configPath(context: Ctx): string {
+  return path.join(storageDir(context), CONFIG_FILE);
 }
 function loadConfig(context: Ctx): LlmConfig | null {
   const p = configPath(context);
-  if (!p || !fs.existsSync(p)) return null;
   try {
+    if (!fs.existsSync(p)) return null;
     const c = JSON.parse(fs.readFileSync(p, "utf8"));
     if (c?.apiKey && c?.provider && c?.model) return c as LlmConfig;
-  } catch { /* ignore corrupt config */ }
+  } catch (e) { console.error("[streusel] config read failed:", (e as Error).message); }
   return null;
 }
 function saveConfig(context: Ctx, cfg: LlmConfig): void {
   const p = configPath(context);
-  if (!p) throw new Error("no storage directory available");
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2), "utf8");
 }
+
+/**
+ * Write `html` to a temp file and return a file:// URL. Modal dialogs run page JS
+ * reliably from file: URLs; data: URLs may block inline scripts so the Save button
+ * never posts back.
+ */
+function dialogUrl(context: Ctx, html: string, name: string): string {
+  const dir = context.environment.tempDirectory || storageDir(context);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, name);
+  fs.writeFileSync(p, html, "utf8");
+  return "file://" + p;
+}
+
+const POST_JS = `function post(s){var m={method:"close_and_send",params:[s]};` +
+  `if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.live)window.webkit.messageHandlers.live.postMessage(m);` +
+  `else if(window.chrome&&window.chrome.webview)window.chrome.webview.postMessage(m);}`;
+
+/** Show a simple message modal (errors / notices). Best-effort. */
+async function notify(context: Ctx, title: string, body: string): Promise<void> {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    body{font:13px -apple-system,system-ui,sans-serif;background:#2b2b2b;color:#e6e6e6;margin:18px}
+    h3{margin:0 0 8px} p{color:#bbb;white-space:pre-wrap;line-height:1.4}
+    button{margin-top:14px;padding:7px 16px;background:#0a84ff;color:#fff;border:0;border-radius:4px;cursor:pointer}
+  </style></head><body>
+    <h3>${escapeHtml(title)}</h3><p>${escapeHtml(body)}</p>
+    <button id="ok">OK</button>
+    <script>${POST_JS}document.getElementById('ok').addEventListener('click',function(){post("")});</script>
+  </body></html>`;
+  try { await context.ui.showModalDialog(dialogUrl(context, html, "streusel-message.html"), 440, 220); }
+  catch (e) { console.error("[streusel] notify failed:", (e as Error).message); }
+}
+
+/** fetch from the host's Node, falling back to a node:https shim if global fetch is absent. */
+const httpFetch: typeof fetch = (typeof fetch === "function")
+  ? fetch
+  : (((url: string, init: any = {}) => new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const req = https.request(
+        { method: init.method || "GET", hostname: u.hostname, path: u.pathname + u.search, headers: init.headers },
+        res => {
+          let data = "";
+          res.on("data", d => (data += d));
+          res.on("end", () => resolve({
+            ok: (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300,
+            status: res.statusCode ?? 0,
+            json: async () => JSON.parse(data),
+            text: async () => data,
+          } as Response));
+        },
+      );
+      req.on("error", reject);
+      if (init.body) req.write(init.body);
+      req.end();
+    })) as unknown as typeof fetch);
 
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] ?? c));
@@ -190,46 +249,49 @@ function settingsHtml(current?: LlmConfig): string {
     <input id="model" value="${escapeHtml(model)}" placeholder="claude-3-5-haiku-latest / gpt-4o-mini">
     <label>API key</label>
     <input id="key" type="password" value="${escapeHtml(key)}" placeholder="sk-...">
-    <button onclick="save()">Save</button>
+    <button id="save">Save</button>
     <script>
+      ${POST_JS}
       var DEF={anthropic:"${DEFAULT_MODELS.anthropic}",openai:"${DEFAULT_MODELS.openai}"};
       var pv=document.getElementById('provider'), md=document.getElementById('model');
-      function fill(){ if(!md.value) md.value=DEF[pv.value]; }
-      pv.onchange=function(){ md.value=DEF[pv.value]; }; fill();
-      function post(s){
-        var msg={method:"close_and_send",params:[s]};
-        if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.live) window.webkit.messageHandlers.live.postMessage(msg);
-        else if(window.chrome&&window.chrome.webview) window.chrome.webview.postMessage(msg);
-      }
-      function save(){ post(JSON.stringify({provider:pv.value, model:(md.value||DEF[pv.value]).trim(), apiKey:document.getElementById('key').value.trim()})); }
+      if(!md.value) md.value=DEF[pv.value];
+      pv.addEventListener('change',function(){ md.value=DEF[pv.value]; });
+      document.getElementById('save').addEventListener('click',function(){
+        post(JSON.stringify({provider:pv.value, model:(md.value||DEF[pv.value]).trim(), apiKey:document.getElementById('key').value.trim()}));
+      });
     </script>
   </body></html>`;
 }
 
 /** Open the settings modal; persist and return the config, or null if cancelled. */
 async function openSettings(context: Ctx, current?: LlmConfig): Promise<LlmConfig | null> {
-  const url = "data:text/html;charset=utf-8," + encodeURIComponent(settingsHtml(current));
+  const url = dialogUrl(context, settingsHtml(current), "streusel-settings.html");
   let result: string;
   try {
-    result = await context.ui.showModalDialog(url, 440, 340);
+    result = await context.ui.showModalDialog(url, 460, 360);
   } catch (e) {
     console.error("[streusel] settings dialog error:", (e as Error).message);
     return null;
   }
+  console.log(`[streusel] settings dialog returned: ${result ? `${result.length} chars` : "(empty)"}`);
   if (!result) return null;
+  let cfg: Partial<LlmConfig>;
   try {
-    const cfg = JSON.parse(result) as Partial<LlmConfig>;
-    if (cfg.apiKey && cfg.provider) {
-      const full: LlmConfig = {
-        provider: cfg.provider as Provider,
-        model: cfg.model || DEFAULT_MODELS[cfg.provider as Provider],
-        apiKey: cfg.apiKey,
-      };
-      saveConfig(context, full);
-      return full;
-    }
-  } catch { /* malformed dialog result */ }
-  return null;
+    cfg = JSON.parse(result) as Partial<LlmConfig>;
+  } catch (e) {
+    console.error("[streusel] could not parse dialog result:", (e as Error).message, "raw:", result);
+    return null;
+  }
+  if (!cfg.apiKey || !cfg.provider) { console.warn("[streusel] settings: missing key/provider"); return null; }
+  const full: LlmConfig = {
+    provider: cfg.provider as Provider,
+    model: cfg.model || DEFAULT_MODELS[cfg.provider as Provider],
+    apiKey: cfg.apiKey,
+  };
+  // Persist, but don't let a write failure block this session's generation.
+  try { saveConfig(context, full); console.log(`[streusel] saved config → ${configPath(context)}`); }
+  catch (e) { console.error("[streusel] could not save config:", (e as Error).message); }
+  return full;
 }
 
 /** Locate the session-view slot holding a clip (to place variations beside it). */
@@ -279,14 +341,19 @@ async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
   try {
     await context.ui.withinProgressDialog(`Generating ${count} pattern${count > 1 ? "s" : ""}…`, { progress: 0 }, async (update) => {
       await update(`Asking ${cfg!.provider}…`, 25);
-      patterns = await generatePatterns(cfg!, description, count, key);
+      patterns = await generatePatterns(cfg!, description, count, key, httpFetch);
       await update("Writing clips…", 85);
     });
   } catch (e) {
     console.error("[streusel] generate failed:", (e as Error).message);
+    await notify(context, "Generation failed", (e as Error).message);
     return;
   }
-  if (!patterns.length) { console.warn("[streusel] generate: model returned no valid patterns"); return; }
+  if (!patterns.length) {
+    console.warn("[streusel] generate: model returned no valid patterns");
+    await notify(context, "No patterns", "The model didn't return any valid Streusel patterns. Try rephrasing the description.");
+    return;
+  }
 
   const loc = findClipSlot(context, clip);
   await context.withinTransaction(async () => {
