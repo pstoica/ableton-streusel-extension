@@ -6,13 +6,12 @@ import type { NoteDescription } from "@ableton-extensions/sdk";
 
 type Notes = NoteDescription[];
 
-/** Reverse note order, preserving total duration */
+/** Retrograde: reflect each note around the timeline (reverses order and rhythm). */
 export function rev(notes: Notes): Notes {
   const total = totalBeats(notes);
-  return [...notes].reverse().map((n, i) => {
-    const orig = notes[notes.length - 1 - i];
-    return { ...n, startTime: orig.startTime };
-  });
+  return notes
+    .map(n => ({ ...n, startTime: Math.round((total - n.startTime - n.duration) * 1e6) / 1e6 }))
+    .sort((a, b) => (a.startTime ?? 0) - (b.startTime ?? 0));
 }
 
 /** Sort by pitch ascending */
