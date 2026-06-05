@@ -62,26 +62,73 @@ slow 2               halve speed (stretch durations)
 fast 2               double speed — repeat to fill (see below)
 take 4               keep first N notes
 skip 2               remove every Nth note
-vel 80               set all velocities to 80
-vel rand             randomize velocities
+vel 0.8              set velocity, normalized 0–1 (0.8 → 102)
+vel rand             random velocity per note
 gate 0.5             note length as a fraction of its slot (alias: len)
 ratchet 3            retrigger every note N rapid times
 every 2:rev          apply an operation every N cycles
 ```
 
+### Velocity is normalized 0–1
+
+`vel` takes a **0–1** value (`0` = soft, `1` = full), scaled to MIDI 1–127. So
+`vel 0.5` → 64. Patterns and signals work too: `vel [0.2 0.8]`, `vel sine`.
+
+> **Breaking change:** velocity is no longer raw 0–127. Old patterns like `vel 80`
+> now clamp to full — change them to `vel 0.63`.
+
 ### Pattern arguments
 
 `add`, `semitones`, `slow`, `fast`, `vel`, `gate`, and `ratchet` accept a **pattern**
 instead of a single number. The pattern is sampled per note by its position in the
-cycle, and `<>` advances per cycle:
+cycle, and `<>` advances per cycle. Pattern values may be fractional (handy for the
+0–1 ops):
 
 ```
-0 2 4 | add <0 7>           alternate transpose each cycle
-0 2 4 7 | vel [80 50 90 40] per-step velocities
+0 2 4 | add <0 7>            alternate transpose each cycle
+0 2 4 7 | vel [0.6 0.4 0.9 0.3]   per-step velocities
 0 5 | ratchet <1 3>         no ratchet on cycle 0, triple on cycle 1
 ```
 
-`vel`, `gate`, and `ratchet` also accept `rand`.
+`vel`, `gate`, and `ratchet` also accept `rand` (random per note, 0–1).
+
+### Waveforms (continuous signals)
+
+Where an op takes a number, you can instead give a **waveform** — a continuous LFO
+sampled per note by its position in the clip. Shapes: `sine`, `saw`, `isaw`, `tri`,
+`square`, `noise`. The phase runs continuously across the whole clip, so it stays
+smooth from bar to bar.
+
+```
+<shape>[(lo,hi)] [rate] [phase P] [skew S]
+```
+
+| Part | Meaning | Default |
+|---|---|---|
+| `(lo,hi)` | output range | `0,1` |
+| `rate` | cycles per bar | `1` |
+| `phase P` | phase offset, 0–1 | `0` |
+| `skew S` | pulse-width (square) / peak (tri) / ramp curve (saw), 0–1 | `0.5` |
+
+```
+0*16 | vel sine                 velocity swells up and down each bar
+0*16 | gate saw 2               note length ramps, twice per bar
+0*8  | vel square 1 skew 0.25   25% duty-cycle gate of velocity
+c1*16 | vel noise(0.3,1)        humanized random velocity
+```
+
+**Pluck to scale.** Feed a waveform into `add` (scale-degree shift) and the continuous
+signal is quantized into the current key — a melody plucked from the scale:
+
+```
+0*16 | add sine(0,7)            sine melody, snapped to the scale
+0*16 | add saw(0,7) | vel tri   ascending run + triangle dynamics
+c3*16 | semitones tri(-12,12)   chromatic triangle glide (off the scale)
+```
+
+> **No MIDI CC / automation:** the Extensions SDK can't write CC lanes or clip
+> envelopes yet, so waveforms modulate **note properties** (velocity, gate, pitch),
+> not control-change data.
 
 ### Note length / gate
 

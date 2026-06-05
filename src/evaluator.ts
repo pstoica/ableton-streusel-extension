@@ -1,5 +1,5 @@
 import type { NoteDescription } from "@ableton-extensions/sdk";
-import type { ParsedClip, Weighted, Atom, Op, OpArg } from "./parser.js";
+import type { ParsedClip, Weighted, Atom, Op, OpArg, Wave } from "./parser.js";
 import * as Ops from "./ops.js";
 
 export interface ProjectKey {
@@ -97,8 +97,10 @@ function evalAtom(
       return [{ pitch: clamp(noteToMidi(atom.name), 0, 127), startTime, duration: duration * DEFAULT_GATE, velocity: 90 }];
 
     case "degree": {
+      // degree values may be fractional (op-arg patterns); round when used as a pitch.
+      const v = Math.round(atom.value);
       // chromatic mode: number is a semitone offset from the root; else a scale degree
-      const pitch = chromatic ? 60 + key.rootNote + atom.value : degreeToMidi(atom.value, key);
+      const pitch = chromatic ? 60 + key.rootNote + v : degreeToMidi(v, key);
       return [{ pitch: clamp(pitch, 0, 127), startTime, duration: duration * DEFAULT_GATE, velocity: 90 }];
     }
 
@@ -241,10 +243,34 @@ function atomNumAt(atom: Atom, relPos: number, cycle: number): number {
   }
 }
 
+const frac = (x: number): number => x - Math.floor(x);
+
+/**
+ * Sample a waveform at a note's position. Phase advances continuously across the
+ * whole clip (in bars), so the LFO is smooth from cycle to cycle. Returns a value
+ * in the wave's [lo, hi] range.
+ */
+function evalWave(w: Wave, note: NoteDescription): number {
+  const t = frac((note.startTime / BEATS_PER_CYCLE) * w.rate + w.phase); // 0..1 in period
+  const s = clamp(w.skew, 1e-4, 1 - 1e-4);
+  let u: number; // 0..1 unipolar
+  switch (w.shape) {
+    case "sine":   u = 0.5 - 0.5 * Math.cos(2 * Math.PI * t); break;       // starts at 0, smooth
+    case "saw":    u = Math.pow(t, Math.tan(s * Math.PI / 2)); break;       // skew bends the ramp
+    case "isaw":   u = 1 - t; break;
+    case "tri":    u = t < s ? t / s : (1 - t) / (1 - s); break;            // skew = peak position
+    case "square": u = t < s ? 1 : 0; break;                               // skew = duty cycle
+    case "noise":  u = Math.random(); break;
+    default:       u = 0;
+  }
+  return w.lo + u * (w.hi - w.lo);
+}
+
 /** Resolve an OpArg to a scalar for a specific note's time position. */
 function resolveArg(arg: OpArg, note: NoteDescription, totalBeats: number): number {
   if (typeof arg === "number") return arg;
-  if (arg === "rand") return Math.floor(40 + Math.random() * 87);
+  if (arg === "rand") return Math.random();              // normalized 0–1
+  if (!Array.isArray(arg)) return evalWave(arg, note);   // Wave signal
   const cycle = Math.floor(note.startTime / BEATS_PER_CYCLE);
   const cyclePos = totalBeats > 0
     ? ((note.startTime % BEATS_PER_CYCLE) / BEATS_PER_CYCLE)
@@ -293,14 +319,15 @@ function applyOp(notes: NoteDescription[], op: Op, totalBeats: number, key: Proj
         ...n, pitch: clamp((n.pitch ?? 60) + Math.round(resolveArg(op.value, n, totalBeats)), 0, 127),
       }));
     case "vel":
+      // Velocity args are normalized 0–1 (so 0.5 → 64); scaled to MIDI 1–127.
       return notes.map(n => {
         const v = resolveArg(op.value, n, totalBeats);
-        return { ...n, velocity: clamp(Math.round(v), 1, 127) };
+        return { ...n, velocity: clamp(Math.round(v * 127), 1, 127) };
       });
     case "gate":
       // Scale each note's length: <1 shortens (gaps/staccato), 1 fills the slot, >1 overlaps.
       return notes.map(n => {
-        const g = op.value === "rand" ? 0.2 + Math.random() * 0.8 : resolveArg(op.value, n, totalBeats);
+        const g = resolveArg(op.value, n, totalBeats);
         return { ...n, duration: Math.max(0.001, n.duration * g) };
       });
     case "ratchet": {

@@ -50,8 +50,23 @@ export interface Weighted {
   ratchet: number;  // ^N  — retrigger N rapid hits within the slot (default 1)
 }
 
-// Op argument: scalar, "rand", or a Weighted[] pattern (sampled per-note by time)
-export type OpArg = number | "rand" | Weighted[];
+// A continuous signal source (LFO), sampled per note by its position in the clip.
+// Output is mapped into [lo, hi] (default 0–1). `rate` = cycles per bar, `phase` =
+// 0–1 offset, `skew` = shape skew / pulse-width (0–1, default 0.5).
+export type WaveShape = "sine" | "saw" | "isaw" | "tri" | "square" | "noise";
+export interface Wave {
+  kind: "wave";
+  shape: WaveShape;
+  lo: number;
+  hi: number;
+  rate: number;
+  phase: number;
+  skew: number;
+}
+
+// Op argument: scalar, "rand", a Weighted[] pattern, or a Wave signal — all
+// sampled per-note by the note's time position.
+export type OpArg = number | "rand" | Weighted[] | Wave;
 
 export type Op =
   | { op: "rev" }
@@ -116,12 +131,14 @@ class Scanner {
 // ─── Note / degree recognition ────────────────────────────────────────────────
 
 const NOTE_RE   = /^[a-gA-G][#b]?-?[0-9]$/;
-const DEGREE_RE = /^-?[0-9]+$/;
+// Degrees may be fractional so they double as op-arg pattern values (e.g. vel [0.2 0.8]).
+// Pitch evaluation rounds; numeric op-args keep the fraction.
+const DEGREE_RE = /^-?(?:\d+\.?\d*|\.\d+)$/;
 
 function atomFromWord(word: string, refs: string[]): Atom {
   if (word === "." || word === "~") return { kind: "rest" };
   if (NOTE_RE.test(word))           return { kind: "note",   name: word.toLowerCase() };
-  if (DEGREE_RE.test(word))         return { kind: "degree", value: parseInt(word) };
+  if (DEGREE_RE.test(word))         return { kind: "degree", value: parseFloat(word) };
   throw new Error(`Unknown atom: "${word}"`);
 }
 
@@ -246,12 +263,53 @@ function detectMerge(raw: string, refs: string[]): Weighted[] | null {
 
 // ─── Operation parser (unchanged) ────────────────────────────────────────────
 
-/** Parse an op argument as a pattern if it contains mini-notation, else as a number. */
+const WAVE_SHAPES: Record<string, WaveShape> = {
+  sine: "sine", sin: "sine",
+  saw: "saw", ramp: "saw",
+  isaw: "isaw",
+  tri: "tri", triangle: "tri",
+  square: "square", sqr: "square", pulse: "square",
+  noise: "noise", perlin: "noise",
+};
+
+/**
+ * Parse a waveform op-arg, else null.
+ *   sine | saw(-12,12) | tri 2 | square 4 phase 0.25 skew 0.3 | noise(0.3,1)
+ * Shape (optionally with a (lo,hi) range) comes first; then in any order a bare
+ * number (rate, cycles/bar), `phase <n>`, and `skew <n>`.
+ */
+function parseWave(arg: string): Wave | null {
+  const tokens = arg.trim().split(/\s+/);
+  const head = tokens[0];
+  if (!head) return null;
+  const m = head.match(/^([a-zA-Z]+)(?:\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*\))?$/);
+  if (!m) return null;
+  const shape = WAVE_SHAPES[m[1]!.toLowerCase()];
+  if (!shape) return null;
+  const wave: Wave = {
+    kind: "wave", shape,
+    lo: m[2] !== undefined ? parseFloat(m[2]) : 0,
+    hi: m[3] !== undefined ? parseFloat(m[3]) : 1,
+    rate: 1, phase: 0, skew: 0.5,
+  };
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!.toLowerCase();
+    if (t === "phase" && tokens[i + 1] !== undefined) wave.phase = parseFloat(tokens[++i]!);
+    else if (t === "skew" && tokens[i + 1] !== undefined) wave.skew = parseFloat(tokens[++i]!);
+    else if (/^-?\d*\.?\d+$/.test(t)) wave.rate = parseFloat(t);
+  }
+  return wave;
+}
+
+/** Parse an op argument: number, "rand", a waveform, or a mini-notation pattern. */
 function parseOpArg(arg: string | undefined, defaultNum: number): OpArg {
   if (!arg) return defaultNum;
   if (arg === "rand") return "rand";
   // Plain number?
   if (/^-?\d+(\.\d+)?$/.test(arg)) return parseFloat(arg);
+  // Waveform / continuous signal?
+  const wave = parseWave(arg);
+  if (wave) return wave;
   // Otherwise try parsing as a mini-notation pattern of numbers
   try {
     const sc = new Scanner(arg);
