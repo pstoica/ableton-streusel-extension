@@ -8,7 +8,7 @@
 import { parse } from "../src/parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "../src/evaluator.js";
 import { buildGraph, topoSort, dependents, type ClipNode } from "../src/resolver.js";
-import { extractPatterns, validatePatterns, buildSystemPrompt, buildUserPrompt, generatePatterns, type LlmConfig } from "../src/llm.js";
+import { extractPatterns, validatePatterns, buildSystemPrompt, buildUserPrompt, generatePatterns, isAuthError, type LlmConfig } from "../src/llm.js";
 
 const KEY: ProjectKey = { rootNote: 0, scaleIntervals: [0, 2, 4, 5, 7, 9, 11], bpm: 120 };
 const EMPTY: ClipStore = { get: () => undefined };
@@ -179,6 +179,12 @@ check("user prompt asks for N variations", buildUserPrompt("warm arp", 3).includ
   try { await generatePatterns(cfgA, "x", 1, undefined, errFetch); } catch (e) { threw = (e as Error).message.includes("401"); }
   check("HTTP error throws with status", threw);
 }
+check("isAuthError detects key failures, not other errors",
+  isAuthError("anthropic API 401: invalid x-api-key") &&
+  isAuthError("Incorrect API key provided") &&
+  isAuthError("openai API 403: permission denied") &&
+  !isAuthError("network timeout") &&
+  !isAuthError("openai API 500: internal server error"));
 
 // ─── Report ────────────────────────────────────────────────────────────────────
 const total = passed + failures.length;

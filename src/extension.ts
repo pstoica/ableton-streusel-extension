@@ -17,7 +17,7 @@ import {
 import { parse } from "./parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "./evaluator.js";
 import { buildGraph, topoSort, dependents } from "./resolver.js";
-import { generatePatterns, DEFAULT_MODELS, type LlmConfig, type Provider } from "./llm.js";
+import { generatePatterns, isAuthError, DEFAULT_MODELS, type LlmConfig, type Provider } from "./llm.js";
 
 // ─── Project key from Live ────────────────────────────────────────────────────
 function getKey(context: ReturnType<typeof initialize>): ProjectKey {
@@ -166,6 +166,10 @@ function saveConfig(context: Ctx, cfg: LlmConfig): void {
   const p = configPath(context);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(cfg, null, 2), "utf8");
+}
+function clearConfig(context: Ctx): void {
+  const p = configPath(context);
+  try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) { console.error("[streusel] clear config failed:", (e as Error).message); }
 }
 
 /**
@@ -319,6 +323,23 @@ function writePattern(clip: MidiClip<"1.0.0">, pattern: string, key: ProjectKey)
   return true;
 }
 
+/** Run one generation pass inside a progress dialog. Returns patterns or the error. */
+async function runGeneration(
+  context: Ctx, cfg: LlmConfig, description: string, count: number, key: ProjectKey,
+): Promise<{ patterns?: string[]; error?: Error }> {
+  try {
+    let patterns: string[] = [];
+    await context.ui.withinProgressDialog(`Generating ${count} pattern${count > 1 ? "s" : ""}…`, { progress: 0 }, async (update) => {
+      await update(`Asking ${cfg.provider}…`, 25);
+      patterns = await generatePatterns(cfg, description, count, key, httpFetch);
+      await update("Writing clips…", 85);
+    });
+    return { patterns };
+  } catch (e) {
+    return { error: e as Error };
+  }
+}
+
 /** Generate from a "?[N] description" clip name; write variation 1 into the clip, the rest into adjacent empty slots. */
 async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
   const raw = clip.name.trim();
@@ -337,41 +358,47 @@ async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
   }
 
   const key = getKey(context);
-  let patterns: string[] = [];
-  try {
-    await context.ui.withinProgressDialog(`Generating ${count} pattern${count > 1 ? "s" : ""}…`, { progress: 0 }, async (update) => {
-      await update(`Asking ${cfg!.provider}…`, 25);
-      patterns = await generatePatterns(cfg!, description, count, key, httpFetch);
-      await update("Writing clips…", 85);
-    });
-  } catch (e) {
-    console.error("[streusel] generate failed:", (e as Error).message);
-    await notify(context, "Generation failed", (e as Error).message);
+  let { patterns, error } = await runGeneration(context, cfg, description, count, key);
+
+  // On a bad/expired key: drop the saved config, let the user re-enter it, retry once.
+  if (error && isAuthError(error.message)) {
+    console.warn("[streusel] auth error — clearing key and re-prompting:", error.message);
+    clearConfig(context);
+    await notify(context, "Invalid API key", `${cfg.provider} rejected the key:\n${error.message}\n\nEnter a new key to continue.`);
+    const fresh = await openSettings(context, { ...cfg, apiKey: "" });
+    if (!fresh) return;
+    ({ patterns, error } = await runGeneration(context, fresh, description, count, key));
+  }
+
+  if (error) {
+    console.error("[streusel] generate failed:", error.message);
+    await notify(context, "Generation failed", error.message);
     return;
   }
-  if (!patterns.length) {
+  if (!patterns || !patterns.length) {
     console.warn("[streusel] generate: model returned no valid patterns");
     await notify(context, "No patterns", "The model didn't return any valid Streusel patterns. Try rephrasing the description.");
     return;
   }
+  const pats = patterns;
 
   const loc = findClipSlot(context, clip);
   await context.withinTransaction(async () => {
-    writePattern(clip, patterns[0]!, key);
-    if (loc && patterns.length > 1) {
+    writePattern(clip, pats[0]!, key);
+    if (loc && pats.length > 1) {
       const slots = loc.track.clipSlots;
       let vi = 1;
-      for (let i = loc.index + 1; i < slots.length && vi < patterns.length; i++) {
+      for (let i = loc.index + 1; i < slots.length && vi < pats.length; i++) {
         if (slots[i]?.clip) continue; // occupied — skip to the next empty slot
-        const parsed = parse(patterns[vi]!);
+        const parsed = parse(pats[vi]!);
         const length = (parsed?.cycles ?? 2) * 4;
         const newClip = (await slots[i]!.createMidiClip(length)) as MidiClip<"1.0.0">;
-        writePattern(newClip, patterns[vi]!, key);
+        writePattern(newClip, pats[vi]!, key);
         vi++;
       }
     }
   });
-  console.log(`[streusel] generated ${patterns.length} pattern(s) from "${description}"`);
+  console.log(`[streusel] generated ${pats.length} pattern(s) from "${description}"`);
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────
@@ -437,8 +464,9 @@ export function activate(activation: ActivationContext) {
   context.ui.registerContextMenuAction("MidiTrack.ArrangementSelection", "Evaluate selection",        "streusel.evalArrangement");
   context.ui.registerContextMenuAction("MidiClip",                       "Evaluate + propagate",      "streusel.eval");
   context.ui.registerContextMenuAction("MidiClip",                       "Generate pattern (AI)",     "streusel.generate");
+  context.ui.registerContextMenuAction("MidiClip",                       "Streusel: AI settings / key…", "streusel.settings");
   context.ui.registerContextMenuAction("MidiTrack",                      "Evaluate all on track",     "streusel.evalTrack");
-  context.ui.registerContextMenuAction("MidiTrack",                      "Streusel: AI settings…",    "streusel.settings");
+  context.ui.registerContextMenuAction("MidiTrack",                      "Streusel: AI settings / key…", "streusel.settings");
 
   // ─── HTTP trigger server ────────────────────────────────────────────────────
   // Clips prefixed with * are "marked" — the hotkey evaluates all of them.

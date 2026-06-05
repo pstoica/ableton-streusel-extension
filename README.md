@@ -220,7 +220,11 @@ in the same track column — so you audition them by playing the slots.
 **Bring your own key.** The first generate opens a dialog to pick a provider
 (Anthropic or OpenAI), model, and paste your API key. It's stored locally in the
 extension's storage directory and only sent to the provider you choose — nothing
-is bundled or shared. Change it anytime via **Streusel: AI settings…**.
+is bundled or shared. Change or reset it anytime via **Streusel: AI settings / key…**
+(on the clip or track menu).
+
+If the provider rejects the key, Streusel clears the saved key, tells you why, and
+re-opens the dialog so you can enter a new one — then retries automatically.
 
 ## Hotkey (marked clips)
 

@@ -95,6 +95,12 @@ export function extractPatterns(text: string): string[] {
     .filter(Boolean);
 }
 
+/** Heuristic: did an API error message come from a bad/missing/expired key? */
+export function isAuthError(message: string): boolean {
+  return /\b40[13]\b/.test(message)
+    || /unauthor|invalid[_\s-]*api|invalid.*key|authentication|x-api-key|incorrect api key|permission/i.test(message);
+}
+
 /** Keep only lines that parse as valid Streusel, de-duplicated, preserving order. */
 export function validatePatterns(lines: string[]): string[] {
   const seen = new Set<string>();
