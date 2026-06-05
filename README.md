@@ -187,12 +187,16 @@ cycle**, landing exactly on the grid and resolving `<>` alternation identically.
 
 ### Cycle count
 
-Append `@N` to set how many cycles to render (default: 2):
+Append `@N` to set how many cycles to render (default: 2). One cycle = 4 beats, so
+`@4` is 16 beats:
 
 ```
-0 2 4 5 @4           4 cycles
+0 2 4 5 @4           4 cycles (16 beats)
 [Melody] | rev @8    8 cycles
 ```
+
+When you change `@N` and re-evaluate, Streusel resizes the clip's loop to match (see
+[Loop length](#loop-length) for the caveats).
 
 ### Examples
 
@@ -213,6 +217,23 @@ n: 0 3 7 10 | rev    chromatic slice indices, reversed
 
 When you evaluate a clip, Streusel scans the entire session for clips that reference it and rebuilds them automatically in dependency order. Change `[Melody]`, right-click → **Evaluate + propagate** → all derived clips update.
 
+## Loop length
+
+The Live Extensions SDK has **no API to resize an existing clip's loop** — length is
+only settable when a clip is created. So when you change `@N`, Streusel **recreates the
+clip in its slot** at the new length on the next evaluate.
+
+Because that's a delete-and-recreate, there are caveats:
+
+- **Session view only.** Arrangement clips can't be recreated this way, so their loop
+  won't change — notes still update, but you'll need to resize the loop by hand.
+- **The clip's color resets** (it's a new clip). Streusel preserves the name.
+- **If the clip is playing, it stops** when recreated — re-trigger it.
+- It only happens when the length actually changed; same-`@N` re-evaluates just rewrite
+  notes in place.
+- Matching is by clip name, so two clips with identical names in the same set could
+  resize the wrong one — keep names distinct (or use a `name =` handle).
+
 ## Commands
 
 | Context | Command |
@@ -220,8 +241,9 @@ When you evaluate a clip, Streusel scans the entire session for clips that refer
 | MIDI clip | **Evaluate + propagate** — evaluates this clip + all that reference it |
 | MIDI clip | **Generate pattern (AI)** — turn a `?`-prefixed description into a pattern |
 | MIDI clip | **Regenerate (AI)** — re-roll from the clip's saved `;?` prompt |
+| MIDI clip | **Streusel: AI settings / key…** — set/reset provider, model, API key |
 | MIDI track | **Evaluate all on track** — evaluates all pattern clips on the track |
-| MIDI track | **Streusel: AI settings…** — set provider / model / API key |
+| MIDI track | **Streusel: AI settings / key…** — set/reset provider, model, API key |
 | Clip slot selection (Cmd+click) | **Evaluate selection** |
 | Arrangement time selection | **Evaluate selection** |
 

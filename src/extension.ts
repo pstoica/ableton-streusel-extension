@@ -96,8 +96,7 @@ async function evalAndPropagate(
       if (!node) continue;
       const notes = evalClip(node.clip, key, store);
       if (!notes) continue;
-      node.clip.notes = notes;
-      node.clip.looping = true;
+      await applyEval(context, node.clip, notes, parse(node.clip.name)?.cycles ?? 2);
       store.set(name, notes);
       count++;
       console.log(`[streusel] "${name}" → ${notes.length} notes`);
@@ -133,8 +132,7 @@ async function evalBatch(
       if (!node) continue;
       const notes = evalClip(node.clip, key, store);
       if (!notes) continue;
-      node.clip.notes = notes;
-      node.clip.looping = true;
+      await applyEval(context, node.clip, notes, parse(node.clip.name)?.cycles ?? 2);
       store.set(name, notes);
       count++;
     }
@@ -303,6 +301,8 @@ async function openSettings(context: Ctx, current?: LlmConfig): Promise<LlmConfi
   return full;
 }
 
+const BEATS_PER_CYCLE = 4; // a cycle (@1) renders to 4 beats
+
 /** Locate the session-view slot holding a clip (to place variations beside it). */
 function findClipSlot(context: Ctx, clip: MidiClip<"1.0.0">): { track: MidiTrack<"1.0.0">; index: number } | null {
   const targetName = clip.name.trim();
@@ -315,6 +315,55 @@ function findClipSlot(context: Ctx, clip: MidiClip<"1.0.0">): { track: MidiTrack
     }
   }
   return null;
+}
+
+/** The session slot currently holding this clip (matched by name), or null (e.g. arrangement clips). */
+function findSlot(context: Ctx, clip: MidiClip<"1.0.0">): ClipSlot<"1.0.0"> | null {
+  const targetName = clip.name.trim();
+  for (const track of context.application.song.tracks) {
+    if (!(track instanceof MidiTrack)) continue;
+    for (const slot of track.clipSlots) {
+      const c = slot.clip;
+      if (c instanceof MidiClip && c.name.trim() === targetName) return slot as ClipSlot<"1.0.0">;
+    }
+  }
+  return null;
+}
+
+/**
+ * The SDK has no loop-resize API — length is only settable at creation. So when a
+ * pattern's @cycles no longer matches the clip's loop, recreate the clip in its slot
+ * at the right length (Session view only). Destructive: resets color, and if the clip
+ * is playing it will stop. Returns the clip to write into (new one if recreated).
+ */
+async function ensureLength(context: Ctx, clip: MidiClip<"1.0.0">, neededBeats: number): Promise<MidiClip<"1.0.0">> {
+  if (!(neededBeats > 0)) return clip;
+  let current: number;
+  try { current = clip.loopEnd - clip.loopStart; } catch { return clip; }
+  if (Math.abs(current - neededBeats) < 0.01) return clip; // already the right length
+  const slot = findSlot(context, clip);
+  if (!slot) return clip; // not a recreatable session clip
+  const name = clip.name;
+  let color: number | undefined;
+  try { color = clip.color; } catch { /* optional */ }
+  try {
+    await slot.deleteClip();
+    const fresh = (await slot.createMidiClip(neededBeats)) as MidiClip<"1.0.0">;
+    fresh.name = name;
+    if (color !== undefined) { try { fresh.color = color; } catch { /* optional */ } }
+    console.log(`[streusel] resized "${name}" → ${neededBeats} beats`);
+    return fresh;
+  } catch (e) {
+    console.error(`[streusel] could not resize "${name}":`, (e as Error).message);
+    return clip;
+  }
+}
+
+/** Resize a clip to fit its pattern's length (if it's a session clip), then write notes. Keeps the name. */
+async function applyEval(context: Ctx, clip: MidiClip<"1.0.0">, notes: NoteDescription[], cycles: number): Promise<void> {
+  const target = await ensureLength(context, clip, cycles * BEATS_PER_CYCLE);
+  target.notes = notes;
+  target.looping = true;
 }
 
 /** Write a pattern's name + evaluated notes into a clip. */
@@ -390,14 +439,17 @@ async function generateInto(context: Ctx, clip: MidiClip<"1.0.0">, description: 
 
   const loc = findClipSlot(context, clip);
   await context.withinTransaction(async () => {
-    writePattern(clip, pats[0]!, key, description);
+    // Resize the source clip to the generated pattern's length, then write it.
+    const cycles0 = parse(pats[0]!.split(";")[0]!)?.cycles ?? 2;
+    const target0 = await ensureLength(context, clip, cycles0 * BEATS_PER_CYCLE);
+    writePattern(target0, pats[0]!, key, description);
     if (loc && pats.length > 1) {
       const slots = loc.track.clipSlots;
       let vi = 1;
       for (let i = loc.index + 1; i < slots.length && vi < pats.length; i++) {
         if (slots[i]?.clip) continue; // occupied — skip to the next empty slot
         const parsed = parse(pats[vi]!.split(";")[0]!);
-        const length = (parsed?.cycles ?? 2) * 4;
+        const length = (parsed?.cycles ?? 2) * BEATS_PER_CYCLE;
         const newClip = (await slots[i]!.createMidiClip(length)) as MidiClip<"1.0.0">;
         writePattern(newClip, pats[vi]!, key, description);
         vi++;
@@ -538,8 +590,7 @@ export function activate(activation: ActivationContext) {
         const clipStore = { get: (n: string) => store.get(n) };
         try {
           const notes = evaluate(parsed, key, clipStore);
-          clip.notes = notes;
-          clip.looping = true;
+          await applyEval(context, clip, notes, parsed.cycles);
           store.set(parsed.name ?? stripped, notes); // named patterns register under their handle
           console.log(`[streusel] hotkey: "${clip.name}" → ${notes.length} notes`);
           count++;
