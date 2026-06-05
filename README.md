@@ -223,8 +223,10 @@ extension's storage directory and only sent to the provider you choose — nothi
 is bundled or shared. Change or reset it anytime via **Streusel: AI settings / key…**
 (on the clip or track menu).
 
-If the provider rejects the key, Streusel clears the saved key, tells you why, and
-re-opens the dialog so you can enter a new one — then retries automatically.
+If the provider rejects the key **or the model** (e.g. an unknown / retired model
+ID), Streusel tells you why and re-opens the dialog so you can fix it — then retries
+automatically. The model field suggests current IDs per provider, but use whatever
+your account can access.
 
 ## Hotkey (marked clips)
 

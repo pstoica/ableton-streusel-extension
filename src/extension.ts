@@ -17,7 +17,7 @@ import {
 import { parse } from "./parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "./evaluator.js";
 import { buildGraph, topoSort, dependents } from "./resolver.js";
-import { generatePatterns, isAuthError, DEFAULT_MODELS, type LlmConfig, type Provider } from "./llm.js";
+import { generatePatterns, isAuthError, isModelError, DEFAULT_MODELS, MODEL_SUGGESTIONS, type LlmConfig, type Provider } from "./llm.js";
 
 // ─── Project key from Live ────────────────────────────────────────────────────
 function getKey(context: ReturnType<typeof initialize>): ProjectKey {
@@ -250,16 +250,21 @@ function settingsHtml(current?: LlmConfig): string {
       <option value="openai"${provider === "openai" ? " selected" : ""}>OpenAI</option>
     </select>
     <label>Model</label>
-    <input id="model" value="${escapeHtml(model)}" placeholder="claude-3-5-haiku-latest / gpt-4o-mini">
+    <input id="model" list="models" value="${escapeHtml(model)}" placeholder="model id">
+    <datalist id="models"></datalist>
+    <div class="hint">Use a model your account can access. If it's wrong you'll get to fix it.</div>
     <label>API key</label>
     <input id="key" type="password" value="${escapeHtml(key)}" placeholder="sk-...">
     <button id="save">Save</button>
     <script>
       ${POST_JS}
-      var DEF={anthropic:"${DEFAULT_MODELS.anthropic}",openai:"${DEFAULT_MODELS.openai}"};
-      var pv=document.getElementById('provider'), md=document.getElementById('model');
+      var DEF=${JSON.stringify(DEFAULT_MODELS)};
+      var SUG=${JSON.stringify(MODEL_SUGGESTIONS)};
+      var pv=document.getElementById('provider'), md=document.getElementById('model'), dl=document.getElementById('models');
+      function fillSug(){ dl.innerHTML=""; (SUG[pv.value]||[]).forEach(function(m){var o=document.createElement('option');o.value=m;dl.appendChild(o);}); }
       if(!md.value) md.value=DEF[pv.value];
-      pv.addEventListener('change',function(){ md.value=DEF[pv.value]; });
+      fillSug();
+      pv.addEventListener('change',function(){ md.value=DEF[pv.value]; fillSug(); });
       document.getElementById('save').addEventListener('click',function(){
         post(JSON.stringify({provider:pv.value, model:(md.value||DEF[pv.value]).trim(), apiKey:document.getElementById('key').value.trim()}));
       });
@@ -360,12 +365,17 @@ async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
   const key = getKey(context);
   let { patterns, error } = await runGeneration(context, cfg, description, count, key);
 
-  // On a bad/expired key: drop the saved config, let the user re-enter it, retry once.
-  if (error && isAuthError(error.message)) {
-    console.warn("[streusel] auth error — clearing key and re-prompting:", error.message);
-    clearConfig(context);
-    await notify(context, "Invalid API key", `${cfg.provider} rejected the key:\n${error.message}\n\nEnter a new key to continue.`);
-    const fresh = await openSettings(context, { ...cfg, apiKey: "" });
+  // On a settings problem (bad key or unknown model): let the user fix it and retry once.
+  if (error && (isAuthError(error.message) || isModelError(error.message))) {
+    const auth = isAuthError(error.message);
+    if (auth) clearConfig(context); // wipe a bad key; a bad model keeps the (valid) key
+    console.warn(`[streusel] ${auth ? "auth" : "model"} error — re-prompting:`, error.message);
+    await notify(
+      context,
+      auth ? "Invalid API key" : "Model not found",
+      `${cfg.provider} error:\n${error.message}\n\n${auth ? "Enter a new API key." : "Pick a model your account can access."}`,
+    );
+    const fresh = await openSettings(context, auth ? { ...cfg, apiKey: "" } : cfg);
     if (!fresh) return;
     ({ patterns, error } = await runGeneration(context, fresh, description, count, key));
   }

@@ -22,8 +22,14 @@ export interface KeyContext {
 }
 
 export const DEFAULT_MODELS: Record<Provider, string> = {
-  anthropic: "claude-3-5-haiku-latest",
+  anthropic: "claude-haiku-4-5",
   openai: "gpt-4o-mini",
+};
+
+/** Suggested model IDs per provider (shown in the settings dialog; user can override). */
+export const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
+  anthropic: ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-3-5-haiku-latest"],
+  openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
 };
 
 const ROOT_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
@@ -99,6 +105,12 @@ export function extractPatterns(text: string): string[] {
 export function isAuthError(message: string): boolean {
   return /\b40[13]\b/.test(message)
     || /unauthor|invalid[_\s-]*api|invalid.*key|authentication|x-api-key|incorrect api key|permission/i.test(message);
+}
+
+/** Heuristic: did an API error come from an unknown/unavailable model? */
+export function isModelError(message: string): boolean {
+  return /model/i.test(message)
+    && /(not[_\s-]?found|does not exist|no such|unknown|unavailable|deprecat|\b404\b)/i.test(message);
 }
 
 /** Keep only lines that parse as valid Streusel, de-duplicated, preserving order. */
