@@ -28,7 +28,7 @@ export const DEFAULT_MODELS: Record<Provider, string> = {
 
 /** Suggested model IDs per provider (shown in the settings dialog; user can override). */
 export const MODEL_SUGGESTIONS: Record<Provider, string[]> = {
-  anthropic: ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-3-5-haiku-latest"],
+  anthropic: ["claude-haiku-4-5", "claude-sonnet-4-5"],
   openai: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
 };
 
