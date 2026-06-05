@@ -268,6 +268,20 @@ Enable **Developer Mode** in Live → Settings → Extensions, then:
 npm start
 ```
 
+## Tests
+
+```bash
+npm test          # typecheck + run the suite (test/run.ts)
+npm run test:run  # suite only (no typecheck)
+```
+
+`test/run.ts` is a single deterministic assertion suite (~60 checks) covering
+atoms, structure (`[]` `<>` `{}%` euclid), modifiers, the `n:` flag, every op,
+velocity/gate/ratchet, waveforms, `fast ≡ [X]*N`, refs, and the dependency
+resolver. It runs on every push via GitHub Actions — and because the suite only
+imports the SDK as types, CI runs it with `npx tsx` without needing the SDK
+installed.
+
 ## License
 
 MIT

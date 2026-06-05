@@ -7,7 +7,9 @@
     "build": "tsc --noEmit && tsx build.ts",
     "build:prod": "tsc --noEmit && tsx build.ts --production",
     "start": "tsx build.ts && extensions-cli run",
-    "watch": "tsx build.ts --watch"
+    "watch": "tsx build.ts --watch",
+    "test": "tsc --noEmit && tsx test/run.ts",
+    "test:run": "tsx test/run.ts"
   },
   "devDependencies": {
     "@ableton-extensions/cli": "file:/Users/patrick/Downloads/extensions-sdk-1.0.0-beta.0/ableton-extensions-cli-1.0.0-beta.0.tgz",

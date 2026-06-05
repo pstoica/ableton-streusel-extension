@@ -1,0 +1,21 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # The Ableton Extensions SDK is a local-only tarball dependency, so `npm
+      # install` can't run on CI. The test graph (parser/evaluator/ops/resolver)
+      # imports the SDK as *types only*, which tsx erases at runtime — so we run
+      # the suite directly with npx, no install and no SDK needed. (Typecheck
+      # against the SDK happens locally via `npm test`.)
+      - name: Run test suite
+        run: npx -y tsx@4 test/run.ts
