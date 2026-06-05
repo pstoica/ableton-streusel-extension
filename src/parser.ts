@@ -284,23 +284,25 @@ const WAVE_SHAPES: Record<string, WaveShape> = {
  * number (rate, cycles/bar), `phase <n>`, and `skew <n>`.
  */
 function parseWave(arg: string): Wave | null {
-  const tokens = arg.trim().split(/\s+/);
-  const head = tokens[0];
+  const s = arg.trim();
+  // shape, optionally followed by a (lo, hi) range — spaces around the parens and
+  // comma are tolerated: `sine(-12,12)`, `sine( -12 , 12 )`, `saw (0, 7)` all work.
+  const head = s.match(/^([a-zA-Z]+)\s*(?:\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*\))?/);
   if (!head) return null;
-  const m = head.match(/^([a-zA-Z]+)(?:\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*\))?$/);
-  if (!m) return null;
-  const shape = WAVE_SHAPES[m[1]!.toLowerCase()];
+  const shape = WAVE_SHAPES[head[1]!.toLowerCase()];
   if (!shape) return null;
   const wave: Wave = {
     kind: "wave", shape,
-    lo: m[2] !== undefined ? parseFloat(m[2]) : 0,
-    hi: m[3] !== undefined ? parseFloat(m[3]) : 1,
+    lo: head[2] !== undefined ? parseFloat(head[2]) : 0,
+    hi: head[3] !== undefined ? parseFloat(head[3]) : 1,
     rate: 1, phase: 0, skew: 0.5,
   };
-  for (let i = 1; i < tokens.length; i++) {
-    const t = tokens[i]!.toLowerCase();
-    if (t === "phase" && tokens[i + 1] !== undefined) wave.phase = parseFloat(tokens[++i]!);
-    else if (t === "skew" && tokens[i + 1] !== undefined) wave.skew = parseFloat(tokens[++i]!);
+  // remaining tokens: a bare number (rate), `phase <n>`, `skew <n>` in any order
+  const rest = s.slice(head[0].length).trim().split(/\s+/).filter(Boolean);
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]!.toLowerCase();
+    if (t === "phase" && rest[i + 1] !== undefined) wave.phase = parseFloat(rest[++i]!);
+    else if (t === "skew" && rest[i + 1] !== undefined) wave.skew = parseFloat(rest[++i]!);
     else if (/^-?\d*\.?\d+$/.test(t)) wave.rate = parseFloat(t);
   }
   return wave;

@@ -155,6 +155,13 @@ check("rate-1 wave repeats per bar", eq(vels("0*8 | vel tri").slice(0, 8), vels(
   const p = pitches("c3*8 | semitones saw(-12,12)").map(x => x!);
   check("wave range maps (saw -12..12)", Math.min(...p) >= 36 && Math.max(...p) <= 60, J([Math.min(...p), Math.max(...p)]));
 }
+check("waveform tolerates spaces in range/args", (() => {
+  const tight = pitches("c3*8 | semitones sine(-12,12)");
+  return tight.length === 16
+    && eq(tight, pitches("c3*8 | semitones sine(-12, 12)"))
+    && eq(tight, pitches("c3*8 | semitones sine( -12 , 12 )"))
+    && eq(tight, pitches("c3*8 | semitones sine (-12,12)"));
+})());
 
 // ─── fast ≡ [X]*N (grid + alternation equivalence) ─────────────────────────────
 const FAST_CASES: [string, number, number][] = [
