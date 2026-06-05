@@ -39,6 +39,12 @@ lead = [bass] | add 7 | fast 2     ← rebuilds whenever `bass` changes
 
 (Without a handle, `[Name]` still references a plain clip literally named `Name`.)
 
+**Ref scaling.** A bare `[name]` (the whole expression, optionally with `| ops`)
+reproduces the source **1:1** — same length and speed — so `hi = [bass]` *is* bass.
+A ref placed **inside** a subdivision is fit into that slot instead, so
+`[0 [bass]]` packs bass into half a cycle. (So you don't need `| slow N` to undo a
+squash — that was an older behavior.)
+
 ### Comments
 
 Everything after `;` is ignored when evaluating — handy for notes, or to keep the
