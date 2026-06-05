@@ -282,6 +282,18 @@ resolver. It runs on every push via GitHub Actions — and because the suite onl
 imports the SDK as types, CI runs it with `npx tsx` without needing the SDK
 installed.
 
+## Building / packaging
+
+```bash
+npm run build        # bundle src → dist/extension.js (dev)
+npm run build:prod   # minified production bundle
+npm run package      # build:prod + zip into streusel-<version>.ablx
+```
+
+The `.ablx` is the installable Ableton extension archive. Packaging must run
+locally (the SDK is a local-only dependency), so it can't build on CI. See
+[RELEASING.md](RELEASING.md) for the release checklist.
+
 ## License
 
 MIT
