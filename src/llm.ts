@@ -57,13 +57,23 @@ SIGNALS (as an op arg): waveforms sine/saw/tri/square/noise with (lo,hi) range,
   Feeding a wave into add quantizes it to the scale ("pluck to scale").
 CYCLES: append "@N" to set how many cycles render (default 2).
 
+RHYTHM — lean on these for interest, don't just write even note runs:
+  [a b] / [a b c]  pack more hits into a step (subdivision, syncopation)
+  e(3,8) e(5,8)    euclidean grooves; mix pulse counts across voices
+  {a b c}%8        cross-rhythm against the bar
+  ~ or .           rests create space and groove
+  a*3  a^4         repeats and ratchet rolls (fills, hats)
+  !N               hold/accent a step longer
+  | gate 0.4       short/stabby vs sustained
+
 EXAMPLES:
-  0 2 4 5 7 | rev @4
-  c3 [e3 g3] c4 | gate 0.6
-  e(3,8) | vel sine @2
-  0*8 | add sine(0,7) | vel tri
-  <0 5> <2 4> | every 2:rev @4
-  n: 0 3 5 7 10 | rev`;
+  c1 ~ c1 c1 ~ c1 ~ ~ | gate 0.5          syncopated kick
+  e(5,8) | gate 0.7 @2                     euclidean groove
+  [0 0] ~ 0*3 ~ | vel saw                  subdivided + ratcheted hits
+  {c2 e2 g2 a2 b2}%8 | gate 0.6            5-against-8 cross-rhythm
+  0 [2 4] 7 <5 9> | rev @4                 nested + alternation
+  0*8 | add sine(0,7) | vel tri            wave melody, plucked to scale
+  c1^4 ~ c1 ~ c1^2 ~ ~ ~                   ratchet roll fill`;
 
 /** System prompt — teaches the grammar and pins the output format. */
 export function buildSystemPrompt(ctx?: KeyContext): string {
@@ -78,7 +88,9 @@ Rules:
 - Output ONLY Streusel patterns, exactly one per line.
 - No prose, no commentary, no markdown, no backticks, no numbering.
 - Each line must be a complete, valid pattern on its own.
-- Make musical choices that fit the request (rhythm, contour, dynamics).`;
+- Prioritise RHYTHM: vary note density with subdivisions, rests, euclidean and
+  cross-rhythms, ratchets and accents — avoid flat, evenly-spaced runs unless asked.
+- Shape dynamics and articulation with vel and gate so it grooves, not just plays.`;
 }
 
 /** User prompt — asks for `count` distinct patterns matching the description. */

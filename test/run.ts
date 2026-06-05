@@ -7,7 +7,7 @@
  */
 import { parse } from "../src/parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "../src/evaluator.js";
-import { buildGraph, topoSort, dependents, type ClipNode } from "../src/resolver.js";
+import { buildGraph, topoSort, dependents, clipKey, type ClipNode } from "../src/resolver.js";
 import { extractPatterns, validatePatterns, buildSystemPrompt, buildUserPrompt, generatePatterns, isAuthError, isModelError, type LlmConfig } from "../src/llm.js";
 
 const KEY: ProjectKey = { rootNote: 0, scaleIntervals: [0, 2, 4, 5, 7, 9, 11], bpm: 120 };
@@ -60,6 +60,35 @@ check("optional ? within bounds", ev("0? 2? 4? @1").length <= 3);
 // ─── Chromatic flag ────────────────────────────────────────────────────────────
 check("n: chromatic offsets", eq(pitches("n: 0 1 2 3 @1"), [60, 61, 62, 63]));
 check("default stays in key", eq(pitches("0 1 2 3 @1"), [60, 62, 64, 65]));
+
+// ─── Named patterns + comments ─────────────────────────────────────────────────
+check("name = handle parsed, pattern still evaluates", (() => {
+  const p = parse("bass = 0 2 4 | rev @4")!;
+  return p.name === "bass" && p.cycles === 4 && eq(evaluate(p, KEY, EMPTY).slice(0, 3).map(n => n.pitch), [67, 64, 60]);
+})());
+check("name combines with n: and @", (() => {
+  const p = parse("lead = n: 0 1 2 @1")!;
+  return p.name === "lead" && p.chromatic && eq(evaluate(p, KEY, EMPTY).map(n => n.pitch), [60, 61, 62]);
+})());
+check("; comment is ignored when evaluating", eq(pitches("0 2 4 @1 ;? warm arp"), [60, 64, 67]));
+check("comment captured for regeneration", parse("0 2 4 ;? warm arp")?.comment === "? warm arp");
+check("named pattern is referenced via its handle", (() => {
+  const src = parse("bass = 0 2 4 @1")!;
+  const bassNotes = evaluate(src, KEY, EMPTY);
+  const store: ClipStore = { get: n => (n === "bass" ? bassNotes : undefined) };
+  const lead = parse("[bass] | add 7 @1")!;
+  return eq(evaluate(lead, KEY, store).map(n => n.pitch), [72, 76, 79]);
+})());
+
+// ─── Resolver with named-pattern handles ───────────────────────────────────────
+{
+  const clips = [{ name: "bass = 0 2 4 | rev @4" }, { name: "lead = [bass] | add 7" }] as unknown as Parameters<typeof buildGraph>[0];
+  const g = buildGraph(clips);
+  check("graph keyed by handles", eq([...g.keys()], ["bass", "lead"]));
+  check("clipKey returns handle", clipKey("bass = 0 2 4") === "bass" && clipKey("0 2 4") === "0 2 4");
+  check("dependents tracks named refs", eq(dependents("bass", g), ["lead"]));
+  check("topoSort orders source before dependent", eq(topoSort(g), ["bass", "lead"]));
+}
 
 // ─── Operations ────────────────────────────────────────────────────────────────
 check("rev = retrograde", eq(pitches("0 2 4 | rev @1"), [67, 64, 60]), J(pitches("0 2 4 | rev @1")));

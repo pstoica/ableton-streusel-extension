@@ -16,7 +16,7 @@ import {
 } from "@ableton-extensions/sdk";
 import { parse } from "./parser.js";
 import { evaluate, type ProjectKey, type ClipStore } from "./evaluator.js";
-import { buildGraph, topoSort, dependents } from "./resolver.js";
+import { buildGraph, topoSort, dependents, clipKey } from "./resolver.js";
 import { generatePatterns, isAuthError, isModelError, DEFAULT_MODELS, MODEL_SUGGESTIONS, type LlmConfig, type Provider } from "./llm.js";
 
 // ─── Project key from Live ────────────────────────────────────────────────────
@@ -81,8 +81,8 @@ async function evalAndPropagate(
     }
   }
 
-  // Determine what to evaluate: source + dependents
-  const sourceName = sourceClip.name.trim();
+  // Determine what to evaluate: source + dependents (keyed by reference handle)
+  const sourceName = clipKey(sourceClip.name);
   const toEval = [sourceName, ...dependents(sourceName, graph)];
   const order = (() => {
     try { return topoSort(graph); } catch { return [...graph.keys()]; }
@@ -123,7 +123,7 @@ async function evalBatch(
   const order = (() => {
     try { return topoSort(graph); } catch { return [...graph.keys()]; }
   })();
-  const names = new Set(clips.map(c => c.name.trim()));
+  const names = new Set(clips.map(c => clipKey(c.name)));
   const ordered = order.filter(n => names.has(n));
 
   let count = 0;
@@ -318,11 +318,12 @@ function findClipSlot(context: Ctx, clip: MidiClip<"1.0.0">): { track: MidiTrack
 }
 
 /** Write a pattern's name + evaluated notes into a clip. */
-function writePattern(clip: MidiClip<"1.0.0">, pattern: string, key: ProjectKey): boolean {
-  const parsed = parse(pattern);
+function writePattern(clip: MidiClip<"1.0.0">, pattern: string, key: ProjectKey, prompt?: string): boolean {
+  const base = pattern.split(";")[0]!.trim(); // drop any comment the model may have added
+  const parsed = parse(base);
   if (!parsed) return false;
   const notes = evaluate(parsed, key, { get: () => undefined });
-  clip.name = pattern;
+  clip.name = prompt ? `${base}  ;? ${prompt}` : base; // retain the prompt so it can be regenerated
   clip.notes = notes;
   clip.looping = true;
   return true;
@@ -345,17 +346,12 @@ async function runGeneration(
   }
 }
 
-/** Generate from a "?[N] description" clip name; write variation 1 into the clip, the rest into adjacent empty slots. */
-async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
-  const raw = clip.name.trim();
-  const m = raw.match(/^\?(\d*)\s*([\s\S]*)$/);
-  if (!m || !m[2]?.trim()) {
-    console.warn('[streusel] generate: name a clip like "? warm 8-note arp" (optionally "?4 ..." for variations)');
-    return;
-  }
-  const count = m[1] ? Math.max(1, Math.min(16, parseInt(m[1], 10))) : 1;
-  const description = m[2].trim();
-
+/**
+ * Generate `count` patterns for `description`, write variation 1 into `clip` and the
+ * rest into adjacent empty slots. Each clip retains the prompt as a `;?` comment so it
+ * can be regenerated. Handles key/model recovery with one retry.
+ */
+async function generateInto(context: Ctx, clip: MidiClip<"1.0.0">, description: string, count: number) {
   let cfg = loadConfig(context);
   if (!cfg) {
     cfg = await openSettings(context);
@@ -394,21 +390,45 @@ async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
 
   const loc = findClipSlot(context, clip);
   await context.withinTransaction(async () => {
-    writePattern(clip, pats[0]!, key);
+    writePattern(clip, pats[0]!, key, description);
     if (loc && pats.length > 1) {
       const slots = loc.track.clipSlots;
       let vi = 1;
       for (let i = loc.index + 1; i < slots.length && vi < pats.length; i++) {
         if (slots[i]?.clip) continue; // occupied — skip to the next empty slot
-        const parsed = parse(pats[vi]!);
+        const parsed = parse(pats[vi]!.split(";")[0]!);
         const length = (parsed?.cycles ?? 2) * 4;
         const newClip = (await slots[i]!.createMidiClip(length)) as MidiClip<"1.0.0">;
-        writePattern(newClip, pats[vi]!, key);
+        writePattern(newClip, pats[vi]!, key, description);
         vi++;
       }
     }
   });
   console.log(`[streusel] generated ${pats.length} pattern(s) from "${description}"`);
+}
+
+/** Generate from a "?[N] description" clip name. */
+async function generateForClip(context: Ctx, clip: MidiClip<"1.0.0">) {
+  const m = clip.name.trim().match(/^\?(\d*)\s*([\s\S]*)$/);
+  const description = m?.[2]?.split(";")[0]?.trim();
+  if (!description) {
+    await notify(context, "Name the clip first", 'Name a clip like "? warm 8-note arp" (or "?4 …" for variations), then Generate.');
+    return;
+  }
+  const count = m![1] ? Math.max(1, Math.min(16, parseInt(m![1], 10))) : 1;
+  await generateInto(context, clip, description, count);
+}
+
+/** Re-roll a previously generated clip from its retained ";? prompt" comment. */
+async function regenerateClip(context: Ctx, clip: MidiClip<"1.0.0">) {
+  const comment = parse(clip.name)?.comment ?? "";
+  const pm = comment.match(/^\?\s*([\s\S]*)$/);
+  const description = pm?.[1]?.trim();
+  if (!description) {
+    await notify(context, "Nothing to regenerate", 'This clip has no saved prompt. Generate it from a "? description" name first, or add "; ? your prompt" to the name.');
+    return;
+  }
+  await generateInto(context, clip, description, 1);
 }
 
 // ─── Extension entry ──────────────────────────────────────────────────────────
@@ -464,6 +484,12 @@ export function activate(activation: ActivationContext) {
     await generateForClip(context, clip);
   });
 
+  // Re-roll a generated clip from its retained prompt
+  context.commands.registerCommand("streusel.regenerate", async (arg: unknown) => {
+    const clip = context.getObjectFromHandle(arg as Handle, MidiClip) as MidiClip<"1.0.0">;
+    await regenerateClip(context, clip);
+  });
+
   // Open the AI settings dialog (provider / model / API key)
   context.commands.registerCommand("streusel.settings", async () => {
     await openSettings(context, loadConfig(context) ?? undefined);
@@ -474,6 +500,7 @@ export function activate(activation: ActivationContext) {
   context.ui.registerContextMenuAction("MidiTrack.ArrangementSelection", "Evaluate selection",        "streusel.evalArrangement");
   context.ui.registerContextMenuAction("MidiClip",                       "Evaluate + propagate",      "streusel.eval");
   context.ui.registerContextMenuAction("MidiClip",                       "Generate pattern (AI)",     "streusel.generate");
+  context.ui.registerContextMenuAction("MidiClip",                       "Regenerate (AI)",           "streusel.regenerate");
   context.ui.registerContextMenuAction("MidiClip",                       "Streusel: AI settings / key…", "streusel.settings");
   context.ui.registerContextMenuAction("MidiTrack",                      "Evaluate all on track",     "streusel.evalTrack");
   context.ui.registerContextMenuAction("MidiTrack",                      "Streusel: AI settings / key…", "streusel.settings");
@@ -513,7 +540,7 @@ export function activate(activation: ActivationContext) {
           const notes = evaluate(parsed, key, clipStore);
           clip.notes = notes;
           clip.looping = true;
-          store.set(clip.name.trim(), notes);
+          store.set(parsed.name ?? stripped, notes); // named patterns register under their handle
           console.log(`[streusel] hotkey: "${clip.name}" → ${notes.length} notes`);
           count++;
         } catch (e) {

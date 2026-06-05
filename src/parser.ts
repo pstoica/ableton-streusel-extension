@@ -2,7 +2,10 @@
  * Streusel mini-notation parser — recursive descent.
  *
  * Clip name format:
- *   [n:] <expr> [| <op>]* [@<cycles>]
+ *   [name =] [n:] <expr> [| <op>]* [@<cycles>] [; comment]
+ *
+ * Named patterns:  bass = 0 2 4 | rev   → reference the live pattern elsewhere as [bass]
+ * Comments:        0 2 4 ; warm bass    → text after `;` is ignored (used to retain prompts)
  *
  * Leading flag:
  *   n:              chromatic mode — bare numbers are semitone offsets from the
@@ -89,7 +92,9 @@ export interface ParsedClip {
   ops: Op[];
   cycles: number;
   refs: string[];
-  chromatic: boolean; // `n:` prefix — bare numbers are chromatic semitone offsets, not scale degrees
+  chromatic: boolean;  // `n:` prefix — bare numbers are chromatic semitone offsets, not scale degrees
+  name?: string | undefined;     // `name = …` handle — lets other clips reference this live pattern via [name]
+  comment?: string | undefined;  // `; …` trailing comment (e.g. the generating prompt); ignored when evaluating
 }
 
 // ─── Scanner ──────────────────────────────────────────────────────────────────
@@ -370,6 +375,17 @@ export function parse(clipName: string): ParsedClip | null {
   let body = clipName.trim();
   if (!body) return null;
 
+  // Strip trailing `; comment` (retains the generating prompt; ignored when evaluating)
+  let comment: string | undefined;
+  const ci = body.indexOf(";");
+  if (ci >= 0) { comment = body.slice(ci + 1).trim() || undefined; body = body.slice(0, ci).trim(); }
+  if (!body) return null;
+
+  // Leading `name = …` handle → other clips can reference this live pattern via [name]
+  let name: string | undefined;
+  const nameMatch = body.match(/^([A-Za-z_][\w-]*)\s*=\s*/);
+  if (nameMatch) { name = nameMatch[1]; body = body.slice(nameMatch[0].length).trim(); }
+
   // Strip @N cycle suffix
   let cycles = 2;
   const cycleMatch = body.match(/\s*@(\d+(?:\.\d+)?)\s*$/);
@@ -407,5 +423,5 @@ export function parse(clipName: string): ParsedClip | null {
     catch (e) { console.warn(`[streusel] skipping op: "${opStr}"`); }
   }
 
-  return { items, ops, cycles, refs, chromatic };
+  return { items, ops, cycles, refs, chromatic, name, comment };
 }

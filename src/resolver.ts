@@ -12,15 +12,25 @@ export interface ClipNode {
   refs: string[];   // names of clips this one depends on
 }
 
-/** Build a flat map of all evaluatable clips in the session. */
+/**
+ * The key a clip is referenced by: its `name =` handle if it has one, else its
+ * full (trimmed) clip name. `[handle]` in other clips resolves against this.
+ */
+export function clipKey(clipName: string): string {
+  const parsed = parse(clipName);
+  return (parsed?.name ?? clipName).trim();
+}
+
+/** Build a flat map of all evaluatable clips in the session, keyed by reference handle. */
 export function buildGraph(clips: Array<MidiClip<"1.0.0">>): Map<string, ClipNode> {
   const graph = new Map<string, ClipNode>();
   for (const clip of clips) {
-    const name = clip.name.trim();
-    if (!name) continue;
-    const parsed = parse(name);
+    const raw = clip.name.trim();
+    if (!raw) continue;
+    const parsed = parse(raw);
     if (!parsed) continue;  // not a streusel pattern
-    graph.set(name, { clip, name, refs: parsed.refs });
+    const key = parsed.name ?? raw;
+    graph.set(key, { clip, name: key, refs: parsed.refs });
   }
   return graph;
 }

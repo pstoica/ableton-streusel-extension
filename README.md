@@ -7,7 +7,7 @@ Inspired by [mutateful](https://github.com/carrierdown/mutateful), [TidalCycles]
 ## Clip name syntax
 
 ```
-[n:] <expression> [| <operation>]* [@<cycles>]
+[name =] [n:] <expression> [| <operation>]* [@<cycles>] [; comment]
 ```
 
 Operators take their argument after `=` **or** a space — `add=7` and `add 7` are equivalent.
@@ -24,6 +24,28 @@ c3 e3 g3 a3          literal note sequence
 e(3,8)               euclidean rhythm: 3 pulses over 8 steps
 [Melody]             reference another clip by name
 [A] + [B]            merge (stack) two clips
+```
+
+### Named patterns
+
+Give a live pattern a handle with `name =`, then reference it from other clips as
+`[name]` — it resolves to the pattern's *evaluated* notes, and editing the source
+rebuilds everything downstream (see [Dependency graph](#dependency-graph)):
+
+```
+bass = 0 2 4 | rev @4
+lead = [bass] | add 7 | fast 2     ← rebuilds whenever `bass` changes
+```
+
+(Without a handle, `[Name]` still references a plain clip literally named `Name`.)
+
+### Comments
+
+Everything after `;` is ignored when evaluating — handy for notes, or to keep the
+prompt an AI pattern was generated from (see [AI generation](#ai-generation)):
+
+```
+0 2 4 7 | rev @4  ; main theme
 ```
 
 ### Atom modifiers
@@ -197,6 +219,7 @@ When you evaluate a clip, Streusel scans the entire session for clips that refer
 |---|---|
 | MIDI clip | **Evaluate + propagate** — evaluates this clip + all that reference it |
 | MIDI clip | **Generate pattern (AI)** — turn a `?`-prefixed description into a pattern |
+| MIDI clip | **Regenerate (AI)** — re-roll from the clip's saved `;?` prompt |
 | MIDI track | **Evaluate all on track** — evaluates all pattern clips on the track |
 | MIDI track | **Streusel: AI settings…** — set provider / model / API key |
 | Clip slot selection (Cmd+click) | **Evaluate selection** |
@@ -216,6 +239,10 @@ anything that doesn't parse is discarded.
 
 With `?N`, variation 1 replaces the clip and the rest fill the next empty slots
 in the same track column — so you audition them by playing the slots.
+
+**Regenerate.** The prompt is kept on the clip as a `;?` comment
+(`0 2 4 7 | rev @4  ;? warm arp`), so right-click → **Regenerate (AI)** re-rolls
+from the same prompt. Edit the comment to steer the next roll.
 
 **Bring your own key.** The first generate opens a dialog to pick a provider
 (Anthropic or OpenAI), model, and paste your API key. It's stored locally in the
