@@ -355,23 +355,6 @@ function applyOp(notes: NoteDescription[], op: Op, totalBeats: number, key: Proj
 // ─── Main entry ───────────────────────────────────────────────────────────────
 
 export function evaluate(parsed: ParsedClip, key: ProjectKey, store: ClipStore): NoteDescription[] {
-  // Bare alias: when the whole expression is a single unmodified [ref], reproduce the
-  // source at its NATIVE length/scale (not squashed to fit one cycle), then apply ops.
-  // So `hi = [yo]` is just yo. Refs inside subdivisions still fit-to-slot.
-  const only = parsed.items.length === 1 ? parsed.items[0] : undefined;
-  if (only && only.atom.kind === "ref" && only.repeat === 1 && only.ratchet === 1 && !only.optional) {
-    const src = store.get(only.atom.name);
-    if (src && src.length) {
-      let notes = src.map(n => ({ ...n }));
-      const total = Ops.totalBeats(notes);
-      for (const op of parsed.ops) notes = applyOp(notes, op, total, key);
-      return notes
-        .map(n => ({ ...n, pitch: clamp(n.pitch ?? 60, 0, 127) }))
-        .filter(n => n.duration > 0.01);
-    }
-    // source missing/empty → fall through (normal path yields the usual empty/error)
-  }
-
   // Evaluate cycle by cycle so alternation <> can advance per cycle
   const allNotes: NoteDescription[] = [];
   for (let c = 0; c < parsed.cycles; c++) {

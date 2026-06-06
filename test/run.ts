@@ -79,25 +79,11 @@ check("named pattern is referenced via its handle", (() => {
   const lead = parse("[bass] | add 7 @1")!;
   return eq(evaluate(lead, KEY, store).map(n => n.pitch), [72, 76, 79]);
 })());
-check("bare alias reproduces a multi-cycle source 1:1 (no squash)", (() => {
-  const yo = evaluate(parse("yo = 0 2 4 7 @2")!, KEY, EMPTY); // 2 cycles = 8 notes over 8 beats
-  const store: ClipStore = { get: n => (n === "yo" ? yo : undefined) };
-  const hi = evaluate(parse("hi = [yo]")!, KEY, store);
-  return hi.length === yo.length
-    && eq(hi.map(n => +n.startTime.toFixed(3)), yo.map(n => +n.startTime.toFixed(3)))
-    && eq(hi.map(n => n.pitch), yo.map(n => n.pitch));
-})());
-check("bare alias still composes with ops", (() => {
-  const yo = evaluate(parse("yo = 0 2 4 @1")!, KEY, EMPTY);
-  const store: ClipStore = { get: n => (n === "yo" ? yo : undefined) };
-  const span = (ns: ReturnType<typeof ev>) => Math.max(...ns.map(n => n.startTime + n.duration));
-  return Math.abs(span(evaluate(parse("[yo] | slow 2")!, KEY, store)) - 2 * span(yo)) < 0.01;
-})());
-check("ref inside a subdivision still fits its slot", (() => {
+check("ref is scaled to fit its slot", (() => {
   const yo = evaluate(parse("yo = 0 2 4 7 @2")!, KEY, EMPTY); // native span ~8 beats
   const store: ClipStore = { get: n => (n === "yo" ? yo : undefined) };
   const sub = evaluate(parse("0 [yo] @1")!, KEY, store);      // yo packed into half of one cycle
-  return Math.max(...sub.map(n => n.startTime + n.duration)) < 5; // stayed within the cycle, not native 8
+  return Math.max(...sub.map(n => n.startTime + n.duration)) < 5; // fit into the cycle, not native 8
 })());
 
 // ─── Resolver with named-pattern handles ───────────────────────────────────────
